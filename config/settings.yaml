@@ -1,0 +1,32 @@
+# 全局配置
+app:
+  name: 盘后策略选股
+  output_dir: output                # 选股 CSV 输出目录
+  backtest_output_dir: backtest_output   # 回溯测试输出目录
+
+data:
+  adjustflag: 2                     # 复权: 1=后复权, 2=前复权, 3=不复权
+  history_days: 120                 # 选股时每只股票拉取的历史交易日数
+  code_prefixes:                    # 股票池代码前缀范围
+    - sh.60
+    - sh.68
+    - sz.00
+    - sz.30
+  exclude_st: true                  # 剔除 ST / 退市
+  price_min: 0.0                    # 收盘价下限（<=0 表示不限），低于此价不研究
+  price_max: 0.0                    # 收盘价上限（<=0 表示不限），高于此价不研究
+  max_stocks: 0                     # 0=全市场；>0 仅取前 N 只（调试用）
+  explicit_codes: []                # 显式股票列表，非空则忽略全市场扫描
+  # 示例: explicit_codes: ["sh.600519", "sz.000858", "sz.300750"]
+  request_interval: 0.05            # 每只股票请求间隔（秒），降低数据源压力
+  checkpoint_interval: 50           # 每处理 N 只股票落盘一次检查点（断点续跑）
+  resume: true                      # 是否启用断点续跑
+
+schedule:
+  time: "15:30"                     # 每日盘后运行时间（24 小时制）
+  trading_day_only: true            # 仅交易日运行（按星期简单判断）
+
+backtest:
+  holding_days: 5                   # 持仓周期（交易日）
+  lookback_days: 200                # 信号预热所需的前置历史天数
+  commission: 0.001                 # 单边交易费率（用于计算净收益）

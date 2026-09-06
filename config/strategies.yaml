@@ -1,0 +1,74 @@
+# 策略注册表：每条目对应一个策略脚本。
+# 新增策略：在 strategies/ 下新建脚本（定义 Strategy 类，继承 base.BaseStrategy），
+# 然后在此登记 name / script / params 即可，无需改动引擎代码。
+strategies:
+  - name: ma_golden_cross
+    enabled: true
+    script: strategies/ma_golden_cross.py
+    params:
+      short: 5
+      long: 20
+      vol_ratio: 1.2
+
+  - name: volume_breakout
+    enabled: true
+    script: strategies/volume_breakout.py
+    params:
+      n: 20
+      vol_ratio: 1.5
+
+  # ---- 分位筛选（基础）----
+  - name: quantile_range
+    enabled: true
+    script: strategies/quantile_range.py
+    params:
+      window: 60
+      quantile_low: 0.25
+      quantile_high: 0.50
+
+  # ---- 分位筛选 + 均线（在 quantile_range 基础上进一步判断）----
+  - name: quantile_ma
+    enabled: true
+    script: strategies/quantile_ma.py
+    params:
+      window: 60
+      quantile_low: 0.25
+      quantile_high: 0.50
+      ma_short: 5
+      ma_long: 20
+
+  # ---- 分位筛选 + 量能 t 检验（在 quantile_range 基础上判断量能显著放大）----
+  - name: quantile_volume
+    enabled: true
+    script: strategies/quantile_volume.py
+    params:
+      window: 60
+      recent_days: 10
+      significance: 0.01
+      quantile_low: 0.25
+      quantile_high: 0.50
+
+  # ---- 均线粘合 + 放量突破 ----
+  - name: ma_breakout
+    enabled: true
+    script: strategies/ma_breakout.py
+    params:
+      ma_short: 5
+      ma_mid: 10
+      ma_long: 20
+      converge_pct: 0.03
+      breakout_pct: 0.05
+      min_turn: 10.0
+
+  # ---- ma_breakout 信号延迟5日入场（对比用）----
+  - name: ma_breakout_shift5
+    enabled: true
+    script: strategies/ma_breakout_shift.py
+    params:
+      shift: 5
+      ma_short: 5
+      ma_mid: 10
+      ma_long: 20
+      converge_pct: 0.03
+      breakout_pct: 0.05
+      min_turn: 10.0

@@ -1,0 +1,71 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- 测试 / 类型检查缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.coverage.*
+cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- IDE / 编辑器 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- WorkBuddy / 工具产物 ---
+.workbuddy/
+
+# --- 数据与模型产物（可由脚本重建，不入库） ---
+data_library/*.parquet
+data_library/*.json
+models/*.joblib
+models/*.json
+
+# --- 选股 / 回溯输出产物（运行时生成，不入库） ---
+output/*.csv
+backtest_output/*.csv
+
+# --- 日志与临时文件 ---
+*.log
+logs/
+*.tmp
+*.bak
