@@ -74,12 +74,14 @@ class Backtester:
                 continue
             dates = df["date"].astype(str).tolist()
             close = df["close"].astype(float).reset_index(drop=True)
+            open_ = df["open"].astype(float).reset_index(drop=True)
             n = len(df)
 
             for strat_name, strat in strategies:
                 for i in range(1, n):
                     if dates[i] < start_date or dates[i] > end_date:
                         continue
+                    # 信号在 T 日收盘后生成（sub 含截至 T 日的全部数据）
                     sub = df.iloc[: i + 1]
                     try:
                         sig = strat.signal(sub)
@@ -88,14 +90,17 @@ class Backtester:
                     if not sig.get("buy"):
                         continue
 
-                    entry_date = dates[i]
-                    entry_price = float(close.iloc[i])
-                    exit_idx = i + self.holding_days
-                    if exit_idx >= n:
-                        continue  # 持仓期末超出样本，跳过
+                    # P0 修正：T 日收盘生成信号 → T+1 开盘价入场（可成交口径）
+                    # 入场日 = i+1，持仓 holding_days 个交易日后于 i+1+holding 日收盘卖出
+                    entry_idx = i + 1
+                    exit_idx = i + 1 + self.holding_days
+                    if entry_idx >= n or exit_idx >= n:
+                        continue  # 入场或出场日超出样本，跳过
 
+                    entry_date = dates[entry_idx]
+                    entry_price = float(open_.iloc[entry_idx])  # 次日开盘
                     exit_date = dates[exit_idx]
-                    exit_price = float(close.iloc[exit_idx])
+                    exit_price = float(close.iloc[exit_idx])     # 持仓期末收盘
 
                     # 含双边佣金后的净收益
                     gross = exit_price / entry_price - 1

@@ -12,12 +12,31 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import market as _market
+
 # 特征列顺序（训练与预测必须一致）
+# 18 个原始交易特征 + 6 个大盘市场特征（按 date 合并，作为胜率依据）
+MARKET_FEATURES = _market.MARKET_FEATURES
 FEATURES = [
     "volume_ratio_5", "volume_ratio_20", "mcap_log", "ma5_10", "ma5_20", "ma10_20",
     "turn", "pct_chg", "mom_5", "mom_10", "mom_20", "volatility_20",
     "pct_rank_60", "dist_high_20", "dist_low_20", "amount_ratio", "rsi_14", "close_log",
+    *MARKET_FEATURES,  # mkt_ret_1/5/20, mkt_above_ma20/ma60, mkt_vol_20
 ]
+
+
+def _merge_market(f: pd.DataFrame) -> pd.DataFrame:
+    """按 date 合并市场特征（模块缓存自动加载）。缺失则用 0 填充（中性，向后兼容）。"""
+    mkt = _market.get_market_features()
+    if mkt is None or mkt.empty or "date" not in f.columns:
+        for col in MARKET_FEATURES:
+            f[col] = 0.0
+        return f
+    mkt = mkt.rename(columns={c: c for c in MARKET_FEATURES})
+    f = f.merge(mkt[["date", *MARKET_FEATURES]], on="date", how="left")
+    for col in MARKET_FEATURES:
+        f[col] = f[col].fillna(0.0)
+    return f
 
 
 def compute_feature_series(hist: pd.DataFrame) -> pd.DataFrame:
@@ -75,6 +94,8 @@ def compute_feature_series(hist: pd.DataFrame) -> pd.DataFrame:
     f["rsi_14"] = 100 - 100 / (1 + gain / loss)
 
     f["close_log"] = np.log(close)
+    # 合并大盘市场特征（按 date；缓存缺失时填 0）
+    f = _merge_market(f)
     return f
 
 

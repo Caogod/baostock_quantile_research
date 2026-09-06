@@ -121,9 +121,15 @@ class Strategy(BaseStrategy):
         if len(volume) < self.window:
             return self._no_signal("量能数据不足")
 
-        # 2. 近 10 日 vs 60 日基准的单尾 t 检验
-        base_vol = volume.iloc[-self.window:]
+        # 2. 近 recent_days 日（含当日 T）vs 历史基准期（剔除近 recent_days 日与当日）
+        # P0 修正：基准期与近期窗口不得重叠，否则 Welch t 检验违反"两组独立样本"前提，
+        # 协方差被低估、t 值偏大、p 值系统性偏小（"量能显著上升"被夸大）。
+        # 基准期 = T-window ... T-recent_days-1（长度 window-recent_days）
+        # 近期   = T-recent_days ... T（长度 recent_days，含当日已知）
         recent_vol = volume.iloc[-self.recent_days:]
+        base_vol = volume.iloc[-self.window:-self.recent_days]
+        if len(base_vol) < 5:  # 基准期样本过少，t 检验不稳定
+            return self._no_signal("基准期样本不足")
         p = _welch_ttest_pvalue(recent_vol, base_vol)
 
         if p < self.significance:
