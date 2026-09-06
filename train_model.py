@@ -79,9 +79,17 @@ def main() -> int:
     # 特征矩阵 + 对齐交易
     feat_all = precompute_features(lib)
     df = detail.merge(feat_all, left_on=["code", "entry_date"], right_on=["code", "date"], how="left")
-    df["win"] = (df["return_pct"] > 0).astype(int)
+    # 标签：相对沪深300同期超额收益 > 0（替代原"净收益>0"，消除牛市偏差）
+    # 牛市里随机买入大概率>0，模型会学到"牛市特征"而非策略 alpha；
+    # 改超额后模型学习"在当前市场环境下，该信号能否跑赢大盘"。
+    from core.market import benchmark_returns_for_trades
+    bench = benchmark_returns_for_trades(df) * 100.0  # 百分数口径对齐 return_pct
+    df["bench_return_pct"] = bench.round(4)
+    df["excess_return_pct"] = (df["return_pct"].astype(float) - df["bench_return_pct"]).round(4)
+    df["win"] = (df["excess_return_pct"] > 0).astype(int)
     df = df.dropna(subset=FEATURES).reset_index(drop=True)
-    print(f"有效样本: {len(df)}，胜率 {df['win'].mean()*100:.1f}%")
+    print(f"有效样本: {len(df)}，超额胜率 {df['win'].mean()*100:.1f}%"
+          f"（基准：净收益胜率 {(df['return_pct']>0).mean()*100:.1f}%）")
 
     # 时序 CV 要求：按 entry_date 升序排列，避免时序泄漏
     df = df.sort_values("entry_date").reset_index(drop=True)

@@ -134,3 +134,58 @@ def reset_cache() -> None:
     """重置缓存（用于重新构建市场数据后）。"""
     global _market_feat_cache
     _market_feat_cache = None
+
+
+# --------------------------------------------------------------------------- #
+# 基准（沪深300）同期收益 —— 供回测超额收益与模型标签共用
+# --------------------------------------------------------------------------- #
+_close_by_date_cache: dict[str, float] | None = None
+
+
+def _close_map(library_dir: Path | str | None = None) -> dict[str, float]:
+    """加载指数 date->close 映射（模块级缓存）。"""
+    global _close_by_date_cache
+    if _close_by_date_cache is not None:
+        return _close_by_date_cache
+    raw = load_market_raw(library_dir=library_dir)
+    if raw.empty:
+        _close_by_date_cache = {}
+        return _close_by_date_cache
+    _close_by_date_cache = dict(zip(raw["date"].astype(str), raw["close"].astype(float)))
+    return _close_by_date_cache
+
+
+def bench_return(entry_date: str, exit_date: str,
+                 library_dir: Path | str | None = None) -> float:
+    """沪深300在 [entry_date, exit_date] 区间的收益率（小数，如 0.0235）。
+
+    口径：close[exit_date] / close[entry_date] - 1。
+    与策略"entry_date 开盘入场、exit_date 收盘卖出"相比，基准用收盘→收盘，
+    存在 entry 当日日内偏差但量级小；保持口径简单与可解释。
+    日期缺失（库外）返回 0.0（中性，不扭曲超额统计）。
+    """
+    cm = _close_map(library_dir)
+    c0, c1 = cm.get(str(entry_date)), cm.get(str(exit_date))
+    if c0 is None or c1 is None or c0 <= 0:
+        return 0.0
+    return float(c1 / c0 - 1.0)
+
+
+def benchmark_returns_for_trades(detail: pd.DataFrame,
+                                 library_dir: Path | str | None = None) -> pd.Series:
+    """对回测逐笔明细 DataFrame 批量计算基准同期收益（小数）。
+
+    detail 需含 entry_date / exit_date 列。返回与 detail 等长的 Series。
+    """
+    cm = _close_map(library_dir)
+    if not cm:
+        return pd.Series([0.0] * len(detail), index=detail.index)
+    return pd.Series(
+        [
+            (lambda c0, c1: float(c1 / c0 - 1.0) if c0 and c1 and c0 > 0 else 0.0)(
+                cm.get(str(e)), cm.get(str(x))
+            )
+            for e, x in zip(detail["entry_date"], detail["exit_date"])
+        ],
+        index=detail.index,
+    )
