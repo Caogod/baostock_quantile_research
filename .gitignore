@@ -69,3 +69,6 @@ backtest_output/*.csv
 logs/
 *.tmp
 *.bak
+
+*.ipynb_checkpoints
+*.ipynb

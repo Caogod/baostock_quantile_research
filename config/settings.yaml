@@ -7,6 +7,9 @@ app:
 data:
   adjustflag: 2                     # 复权: 1=后复权, 2=前复权, 3=不复权
   history_days: 120                 # 选股时每只股票拉取的历史交易日数
+  index_names:                      # 股票池：使用这些指数成分股的并集（自动去重）
+    - zz500
+    - hs300
   code_prefixes:                    # 股票池代码前缀范围
     - sh.60
     - sh.68

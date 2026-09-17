@@ -18,6 +18,27 @@ from core.selector import Selector
 from core.strategy_loader import load_strategies, load_yaml
 
 
+def _configure_index_pool(fetcher: DataFetcher, settings: dict) -> None:
+    """将配置的指数成分股合并为去重后的显式股票池。"""
+    data_cfg = settings.setdefault("data", {})
+    index_names = data_cfg.get("index_names", []) or []
+    if not index_names:
+        return
+
+    codes = list(data_cfg.get("explicit_codes", []) or [])
+    seen = set(codes)
+    for index_name in index_names:
+        constituents = fetcher.get_index_stocks(str(index_name))
+        for code in constituents["code"].tolist():
+            if code not in seen:
+                codes.append(code)
+                seen.add(code)
+        print(f"股票池已加入 {index_name}: {len(constituents)} 只")
+
+    data_cfg["explicit_codes"] = codes
+    print(f"股票池合计: {len(codes)} 只（zz500 + hs300 去重后）")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="盘后策略选股")
     parser.add_argument("--date", help="选股日期 YYYY-MM-DD，默认最近交易日")
@@ -53,6 +74,7 @@ def main() -> int:
     try:
         fetcher.login()
         if not args.local:
+            _configure_index_pool(fetcher, settings)
             as_of_date = args.date or fetcher.latest_trading_day()
         print(f"盘后选股交易日: {as_of_date}")
         print(f"启用策略: {', '.join(name for name, _ in strategies)}")
