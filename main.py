@@ -1,4 +1,9 @@
-"""盘后选股入口（单次运行）。
+"""盘后选股入口（单次运行）。仅负责选股 + 结果后处理，不影响回测。
+
+选股后附加两件事：
+    1. 胜率模型二次过滤（--filter，可选）
+    2. 持仓账本：登记买入任务（+1 日开盘价买入、+holding+1 日收盘价卖出）、
+       结算到期持仓、输出卖出提醒与按策略收益率复盘。
 
 用法：
     python main.py                          # 对最近一个交易日选股（联网，全市场）
@@ -105,6 +110,30 @@ def main() -> int:
                   f"（阈值 {args.filter_threshold}），输出 {filtered_path}")
             if not filtered.empty:
                 print(filtered[["code", "code_name", "win_prob", "close"]].to_string(index=False))
+
+        # 模块5：持仓账本（买入记录 + 卖出提醒 + 收益率复盘）
+        # 仅消费选股结果，不涉及、不影响回测。
+        # 价格双模式：本地库优先；本地无数据时按需联网补全（仅在确有
+        # to_fill 记录时才真正登录联网，避免无效联网请求）。
+        from core.position_ledger import run_ledger_flow
+
+        def _online_factory():
+            """懒加载联网源：仅在账本确有待补全记录时才被调用。"""
+            try:
+                online = DataFetcher()
+                online.login()
+                return online
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] 联网补全源初始化失败，跳过联网补全: {exc}", file=sys.stderr)
+                return None
+
+        run_ledger_flow(
+            fetcher=fetcher,
+            selection_path=out_path,
+            strategies=strategies,
+            as_of_date=as_of_date,
+            online_fetcher_factory=_online_factory,
+        )
         return 0
     except Exception as exc:
         print(f"[error] {exc}", file=sys.stderr)

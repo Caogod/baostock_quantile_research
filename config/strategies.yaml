@@ -9,6 +9,7 @@ strategies:
       short: 5
       long: 20
       vol_ratio: 1.2
+      holding: 5
 
   - name: volume_breakout
     enabled: true
@@ -16,6 +17,7 @@ strategies:
     params:
       n: 20
       vol_ratio: 1.5
+      holding: 5
 
   # ---- 分位筛选（基础）----
   - name: quantile_range
@@ -25,6 +27,7 @@ strategies:
       window: 60
       quantile_low: 0.25
       quantile_high: 0.50
+      holding: 5
 
   # ---- 分位筛选 + 均线（在 quantile_range 基础上进一步判断）----
   - name: quantile_ma
@@ -36,6 +39,7 @@ strategies:
       quantile_high: 0.50
       ma_short: 5
       ma_long: 20
+      holding: 5
 
   # ---- 分位筛选 + 量能 t 检验（在 quantile_range 基础上判断量能显著放大）----
   - name: quantile_volume
@@ -47,6 +51,7 @@ strategies:
       significance: 0.01
       quantile_low: 0.25
       quantile_high: 0.50
+      holding: 5
 
   # ---- 均线粘合 + 放量突破 ----
   - name: ma_breakout
@@ -59,6 +64,7 @@ strategies:
       converge_pct: 0.03
       breakout_pct: 0.05
       min_turn: 10.0
+      holding: 5
 
   # ---- ma_breakout 信号延迟5日入场（对比用）----
   - name: ma_breakout_shift5
@@ -72,6 +78,7 @@ strategies:
       converge_pct: 0.03
       breakout_pct: 0.05
       min_turn: 10.0
+      holding: 5
 
   # ---- B1 稳健超跌型（同花顺远航版公式移植）----
   - name: b1_oversold
@@ -93,6 +100,7 @@ strategies:
       require_market_down: true
       market_index: "399317"
       min_bars: 65
+      holding: 5
 
   # ---- 均线单次金叉突破 + 低波动 + 动量爆发 ----
   - name: ma_cross_breakout
@@ -114,3 +122,4 @@ strategies:
       cross_ma_mid: 10
       cross_ma_long: 20
       cross_ma_base: 60
+      holding: 5
