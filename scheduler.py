@@ -68,11 +68,11 @@ def main() -> int:
     parser.add_argument("--strategies", default="config/strategies.yaml")
     parser.add_argument("--strategy", help="仅运行指定策略（逗号分隔的名称，可选）")
     parser.add_argument("--local", action="store_true", help="使用本地样本库（Parquet），不联网")
-    parser.add_argument("--library", default="data_library/zz500_daily.parquet",
+    parser.add_argument("--library", default="data_library/combined_daily.parquet",
                         help="本地样本库 Parquet 路径（--local 或 --filter 时使用）")
     parser.add_argument("--filter", action="store_true", help="选股后用胜率模型二次过滤")
-    parser.add_argument("--model", default="models/win_model.joblib",
-                        help="胜率预测模型路径（--filter 时使用）")
+    parser.add_argument("--model", default="models",
+                        help="胜率模型目录（--filter 时按策略加载 win_model_<strategy>.joblib）")
     parser.add_argument("--filter-threshold", type=float, default=0.5,
                         help="二次过滤的胜率阈值（默认 0.5）")
     args = parser.parse_args()

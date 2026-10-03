@@ -46,7 +46,7 @@ baostock 日 K 线接口 `query_history_k_data_plus` 提供完整"五价"字段�
 
 ```
 ├── main.py                  # 盘后选股入口（含 --local / --filter 二次过滤）
-├── backtest.py              # 回溯测试入口（--local 离线）
+├── backtest.py              # 回溯测试入口（多策略 / 多持仓周期 / 多本地库，--local 离线）
 ├── scheduler.py             # 定时调度（常驻/--once，含 --local/--filter）
 ├── build_data_library.py    # 构建本地回溯样本库（--index/--days/价格过滤）
 ├── train_model.py           # 训练胜率预测模型 + 因子重要度 + 留存模型
@@ -62,7 +62,13 @@ baostock 日 K 线接口 `query_history_k_data_plus` 提供完整"五价"字段�
 │   ├── quantile_ma.py       # 分位区间 + MA5>MA20
 │   ├── quantile_volume.py   # 分位区间 + 近10日量能t检验显著放大
 │   ├── ma_breakout.py       # 均线粘合(±3%)+收盘破前一日MA5达5%+换手率>10%
-│   └── ma_breakout_shift.py # ma_breakout 信号延迟5日入场
+│   ├── ma_breakout_shift.py # ma_breakout 信号延迟5日入场
+│   ├── b1_oversold.py       # B1 稳健超跌型（同花顺公式移植）：RSI6<20+振幅>8%+连跌2日
+│   │                        #   +近20日无涨停+当日全市场下跌+非一字板/未封板
+│   └── ma_cross_breakout.py # 单次金叉破MA60 + 突破前低波动(3σ布林带内 或 极差/最小值<阈值)
+│                            #   + N日涨>阈值 + 换手率>MA10×倍数；波动窗口可启用 MA5 连降修剪
+│                            #   （全部数值见 config/strategies.yaml，按序执行：涨幅/量比 → 金叉 → 波动）
+│                            #   内置 analyze_volatility_distribution() 做阈值横截面分位数统计
 ├── core/
 │   ├── compat.py            # pandas 3.x 兼容补丁
 │   ├── data_fetcher.py      # baostock 数据封装（重连重试/限速）
@@ -113,19 +119,112 @@ pip install -r requirements.txt
 ### 盘后选股
 
 ```bash
-python main.py                         # 对最近交易日选股
-python main.py --date 2026-09-04       # 指定交易日
+python main.py                         # 对最近交易日选股（联网，全市场）
+python main.py --date 2026-09-04       # 指定交易日（联网）
 ```
+
+**本地选股（推荐，离线秒级）**：用合并样本库（zz500 + hs300 并集）离线选股，无需联网：
+
+```bash
+python main.py --local --date 2026-09-30                        # 指定交易日（默认取库内最新）
+python main.py --local --strategy ma_cross_breakout             # 仅用指定策略
+python main.py --local --date 2026-09-30 --strategy b1_oversold # 超跌策略离线选股
+```
+
+- `--library` 默认已指向 `data_library/combined_daily.parquet`（合并库），离线选股时无需显式指定；
+  如需换用单个库可 `--library data_library/zz500_daily.parquet`。
 
 结果：`output/selection_<日期>.csv`，列含 `date, code, code_name, strategy, score, reason, close, pctChg, turn, volume, amount`，按策略与打分排序。
 
 ### 回溯测试
 
+一个入口覆盖「多策略 / 多持仓周期 / 多数据源」：
+
 ```bash
-python backtest.py --start 2025-01-01 --end 2025-12-31 --holding 5
+# 单策略、多持仓周期、合并样本库（推荐：一次遍历同时展开 3/5/10 日）
+python backtest.py --start 2025-11-12 --end 2026-09-30 --local \
+    --library data_library/combined_daily.parquet \
+    --strategy ma_cross_breakout --holdings 3,5,10
+
+# 单个持仓周期 / 单个本地库（兼容旧用法）
+python backtest.py --start 2025-11-12 --end 2026-09-30 --local --holding 5 \
+    --library data_library/combined_daily.parquet
+
+# 联网全市场（baostock），跑全部启用策略
+python backtest.py --start 2025-01-01 --end 2025-12-31 --holding 10
 ```
 
-结果：`backtest_output/backtest_detail_*.csv`（逐笔）与 `backtest_summary_*.csv`（胜率/涨幅汇总）。
+| 参数 | 说明 |
+|------|------|
+| `--strategy` | 仅跑指定策略（逗号分隔），缺省跑 YAML 中全部启用策略 |
+| `--holdings` | 持仓周期，逗号分隔（如 `3,5,10`），一次遍历全部展开 |
+| `--holding` | 单个持仓周期（向后兼容，优先于 `--holdings`） |
+| `--libraries` | 多个本地样本库（逗号分隔）；`--library` 为单个兼容写法 |
+| `--no-prefilter` | 关闭向量化预筛，逐日全量计算（用于等价性校验） |
+
+结果（`backtest_output/`）：
+
+- `backtest_detail_<起>_<止>.csv`：逐笔明细，含 `return_pct` / `bench_return_pct` / `excess_return_pct`
+- `backtest_summary_<起>_<止>.csv`：策略 × 数据源 × 持仓周期 汇总（胜率 / 涨幅 / Sharpe / Sortino / 最大回撤）
+- `backtest_combined_<起>_<止>.csv`：策略 × 持仓周期（跨数据源合并）
+- `backtest_signals_<起>_<止>.csv`：信号日志（含 `score` / `reason`）
+
+> **性能**：策略可选实现 `prefilter_mask(close)` 声明"必要条件候选日"，引擎只对候选日调用 `signal()`。
+> `ma_cross_breakout` 已实现（必要条件"近 N 日涨幅 > 阈值"），788 只股票 × 3/5/10 日持仓实测：
+> **12.5 秒 vs 全量扫描 33 秒**，且信号集、逐笔收益、reason 文本与全量扫描**完全一致**。
+
+> **交易冷却期**：同一股票同一策略入场后冷却 `holding` 个交易日（= 持有期），平仓前不再重复入场，
+> 避免同一标的在持有期内被反复计入。冷却期按持仓周期独立维护。
+
+> **净值类指标口径**：`cum_return_pct` / `max_drawdown_pct` / `sharpe` / `sortino` 基于
+> **按日历日去重叠的等权组合净值曲线**计算——每笔交易收益按几何方式摊到 `[entry, exit]` 区间，
+> 同日多笔等权合并，再连乘得逐日净值。这与旧的"重叠交易直接连乘"不同，不会因信号重叠而被重复复利放大。
+> 注意预筛提速幅度取决于该必要条件的选择性：`surge_pct` 越小（候选日越多），提速越不明显。
+
+### 波动窗口的 MA5 连降修剪（ma_cross_breakout）
+
+条件按"廉价且筛选力强"排序执行（顺序不影响结果，只影响性能）：
+**① 涨幅 + 量比 → ② 单次金叉 → ③ 低波动**。
+
+`trim_decline: true` 时，在判定低波动**之前**，从"突破前窗口"**头部**检查 MA5 是否连续下降；
+若有连降，则把这段下降区间剔除，**从停止下降的时刻开始**计算波动率（窗口尾部不变，仍截止 T−surge_days）。
+修剪后窗口不足 `min_vol_days` 日则直接不出信号。
+
+实测（zz500+hs300，2025-11-12 ~ 2026-09-30）：
+
+| | 信号数 | 3日胜率 | 5日胜率 | 10日胜率 |
+|---|---|---|---|---|
+| `trim_decline: false` | 210 | 43.1% | 45.8% | 35.2% |
+| `trim_decline: true` | 213 | 43.0% | 45.6% | 34.7% |
+
+- 48.8%（104/213）的信号实际触发了修剪（连降 2~26 日）；但**只翻转了 3 个信号**的判定，其余仅窗口口径变化而结论不变。
+- 3 个新增信号全部走"极差/最小值"支路——修剪掉头部下跌段后 (max−min)/min 从 >26% 降到 <26%。
+- **注意**：修剪只会**放宽**布林带分支（检查的点变少），因此它只可能新增信号、不会剔除信号。
+- 对比明细：`backtest_output/backtest_trim_effect_*.csv`。
+
+
+### 需要外部数据的策略（市场指数 / 证券元数据）
+
+`signal(df)` 只接收单只股票日 K。若策略需要"自身 K 线之外"的信息（如当日全市场涨跌、
+上市日期、板块归属），使用上下文机制：
+
+```python
+class Strategy(BaseStrategy):
+    def bind_context(self, ctx):                 # 入口开跑前调用一次
+        self._market_down = ctx["market_down"]   # Series[bool]，index=交易日字符串
+        self._meta = ctx["meta"]                 # DataFrame，index=code：name/ipoDate/type/status
+```
+
+上下文由 `core/market_context.build_context()` 生成，指数行情与证券元数据缓存在
+`data_library/_ctx/`（首次联网拉取，之后离线复用）。CLI：`--market-index`（默认 399317
+国证A指）、`--refresh-ctx`（强制刷新缓存）。
+
+代表策略 **`b1_oversold`**（同花顺「B1 稳健超跌型」移植）：要求当日全市场下跌 +
+RSI6<20 + 当日振幅>8% + 连跌 2 日 + 近 20 日无涨停 + 非一字板/未封板。
+
+> ⚠️ **读结果时先看信号的时间分布**：这类"恐慌买入"策略的信号高度聚集在少数暴跌日
+> （实测 102 个信号仅落在 17 个交易日，84% 集中在 2026-07 那轮暴跌），
+> 胜率本质上是少数几次市场事件的结果，不能当作独立样本看待。
 
 ### 胜率预测模型（训练 + 二次过滤）
 
@@ -152,19 +251,39 @@ python main.py --local --date 2026-09-04 --strategy ma_breakout_shift5 --filter 
 把指定指数成分股最近 N 个交易日数据落地为 Parquet（pandas 快速列式格式），可加股价过滤：
 
 ```bash
+python build_data_library.py                          # 默认：更新 zz500 + hs300 两库并合并
+python build_data_library.py --index hs300            # 仅更新 hs300（不合并）
+python build_data_library.py --indexes zz500,hs300    # 更新多个指数并合并
 python build_data_library.py --index zz500 --days 200 --price-min 2 --price-max 300
 ```
 
-- `--index`：hs300(沪深300) / zz500(中证500) / sz50(上证50)，默认 zz500
+- `--index`：只更新单个指数 hs300 / zz500 / sz50（不合并）
+- `--indexes`：更新多个指数（逗号分隔），完成后自动合并
+- 不带 `--index/--indexes` 时，默认更新 zz500 + hs300 两库并合并为统一库
 - `--price-min/--price-max`：股价过滤范围（0 表示不限），默认 2~300 元
+- `--no-combine`：多指数/默认流程构建完成后不自动合并
 
 产物在 `data_library/`：`<index>_daily.parquet`（长表）、`<index>_stocks.parquet`（成分股）、`<index>_meta.json`（构建信息）。
+
+**合并库**：把 zz500 与 hs300 合并为一个统一库（交集以 zz500 优先）。默认流程（不带参数）会在更新两库后自动合并；也可手动触发：
+
+```bash
+python build_data_library.py --combine
+```
+
+合并产物：`combined_daily.parquet`（并集去重长表）、`combined_stocks.parquet`、`combined_meta.json`。
 
 之后回溯**离线、秒级**完成，不再联网：
 
 ```bash
+# 合并库、单周期
 python backtest.py --start 2025-11-12 --end 2026-09-04 --holding 5 --local \
-    --library data_library/zz500_daily.parquet
+    --library data_library/combined_daily.parquet
+
+# 合并库、多周期：一次统计 zz500 + hs300 并集的 3/5/10 日表现
+python backtest.py --start 2025-11-12 --end 2026-09-30 --local \
+    --library data_library/combined_daily.parquet \
+    --strategy ma_cross_breakout --holdings 3,5,10
 ```
 
 > 说明：
@@ -183,7 +302,7 @@ python scheduler.py --once --local --filter            # 离线选股 + 胜率�
 
 > 无界面常驻进程；生产环境建议用 `scheduler.py --once` 配合系统级定时任务（Linux cron / Windows 任务计划程序），或 `systemd` / `nssm` 托管常驻进程。
 >
-> 定时流程同样支持选股后二次过滤：加 `--filter` 即可（配合 `--local --library` 用本地样本库离线运行最稳妥）。
+> 定时流程同样支持选股后二次过滤：加 `--filter` 即可（配合 `--local` 用本地样本库离线运行最稳妥；`--library` 默认已指向合并库 `combined_daily.parquet`）。
 
 ---
 
@@ -257,7 +376,9 @@ class Strategy(BaseStrategy):
 ## 八、已知限制
 
 1. **baostock 免费服务的脆弱性**：高频连续请求（约百次量级）后偶发服务端连接重置，甚至进程级异常（无法在 Python 内捕获）。本项目以"断点续跑 + 重连重试 + 限速"缓解；全市场扫描（约 5000 只）建议分时段或调大 `request_interval`。该现象在开发沙箱中可能因网络策略被放大，本地直连通常更稳。
-2. **回溯的累计收益为"独立交易复利"口径**：每个信号按独立交易统计，信号间可能持仓重叠，故 `cum_return_pct` 会被高估，仅作参考；`win_rate` 与 `avg/median_return` 为逐信号口径，更有参考价值。
+2. **回溯的累计收益为"去重叠等权组合"口径**：`cum_return_pct` / `max_drawdown_pct` / `sharpe` / `sortino`
+   基于按日历日摊薄、同日等权合并的组合净值曲线计算，已消除旧版"重叠交易直接连乘"导致的失真；
+   `win_rate` 与 `avg/median_return` 仍为逐笔信号口径。
 3. **幸存者偏差**：全市场回溯以回测期末在市的股票为样本，已退市股票未纳入。
 4. **数据为日级**：不适用于盘中/高频策略，信号基于收盘数据。
 5. 示例策略仅作演示，不构成投资建议。

@@ -1,4 +1,10 @@
-"""胜率预测模型（模块4）：加载已训练模型，对选股结果二次过滤。"""
+"""胜率预测模型（模块4）：加载已训练模型，对选股结果二次过滤。
+
+支持两种模型形态：
+- 每策略独立模型（推荐）：`models/win_model_<strategy>.joblib`，按选股结果的
+  strategy 列逐策略加载对应模型过滤（WinModelSet）。
+- 单一全局模型（兼容）：`models/win_model.joblib`，对所有策略共用（WinModel）。
+"""
 from __future__ import annotations
 
 import json
@@ -60,6 +66,59 @@ class WinModel:
         return out[out["win_prob"] >= threshold]
 
 
+class WinModelSet:
+    """按策略加载一组独立模型，对含 strategy 列的选股结果逐策略过滤。"""
+
+    def __init__(self, model_dir: str | Path, strategies: list[str] | None = None) -> None:
+        self.model_dir = Path(model_dir)
+        if not self.model_dir.is_dir():
+            raise FileNotFoundError(f"模型目录不存在: {self.model_dir}")
+        self.models: dict[str, WinModel] = {}
+        for strat in strategies or []:
+            p = self.model_dir / f"win_model_{strat}.joblib"
+            if p.exists():
+                self.models[strat] = WinModel(p)
+
+    def _model_for(self, strategy: str) -> WinModel | None:
+        if strategy in self.models:
+            return self.models[strategy]
+        p = self.model_dir / f"win_model_{strategy}.joblib"
+        if p.exists():
+            self.models[strategy] = WinModel(p)
+            return self.models[strategy]
+        return None
+
+    def filter_selection(
+        self,
+        selection_df: pd.DataFrame,
+        library: pd.DataFrame,
+        threshold: float = 0.5,
+    ) -> tuple[pd.DataFrame, set[str]]:
+        """逐策略过滤。返回 (过滤后结果, 缺失模型的策略集合)。"""
+        if selection_df.empty:
+            return selection_df.assign(win_prob=[]), set()
+
+        missing: set[str] = set()
+        probs: list[float] = []
+        for _, row in selection_df.iterrows():
+            strat = str(row.get("strategy", ""))
+            model = self._model_for(strat)
+            if model is None:
+                probs.append(float("nan"))
+                missing.add(strat)
+                continue
+            feat = feature_at(library, row["code"], row["date"])
+            if feat.empty or feat[model.features].isna().any().any():
+                probs.append(float("nan"))
+            else:
+                probs.append(float(model.predict_prob(feat)[0]))
+
+        out = selection_df.copy()
+        out["win_prob"] = probs
+        out = out.sort_values("win_prob", ascending=False).reset_index(drop=True)
+        return out[out["win_prob"] >= threshold], missing
+
+
 def apply_filter(
     out_path: str | Path,
     library_path: str | Path,
@@ -69,15 +128,37 @@ def apply_filter(
     """选股结果二次过滤（公共入口，供 main.py 与 scheduler.py 复用）。
 
     读取选股 CSV → 用本地样本库算特征 → 模型打分 → 过滤 → 写 *_filtered.csv。
+
+    model_path 支持两种形态：
+    - 目录：按 selection 的 strategy 列逐策略加载 `win_model_<strategy>.joblib`；
+      某策略无对应模型时跳过（保留其他策略的过滤结果），并打印告警。
+    - 文件：单一全局模型，对所有策略共用（向后兼容）。
+
     返回 (过滤后路径, 原始数量, 保留数量, 过滤结果 DataFrame)。
     """
     selection = pd.read_csv(out_path)
-    if selection.empty:
-        filtered = selection.assign(win_prob=pd.Series(dtype=float))
+
+    lib_df = pd.read_parquet(library_path).sort_values("date") if not selection.empty else pd.DataFrame()
+
+    mp = Path(model_path)
+    if mp.is_dir():
+        # 每策略独立模型
+        strategies = sorted(selection["strategy"].dropna().astype(str).unique()) if not selection.empty else []
+        model_set = WinModelSet(mp, strategies=strategies)
+        if selection.empty:
+            filtered = selection.assign(win_prob=pd.Series(dtype=float))
+            missing = set()
+        else:
+            filtered, missing = model_set.filter_selection(selection, lib_df, threshold=threshold)
+        if missing:
+            print(f"[filter] 以下策略缺少独立模型，已跳过: {sorted(missing)}")
     else:
-        lib_df = pd.read_parquet(library_path).sort_values("date")
-        model = WinModel(model_path)
-        filtered = model.filter_selection(selection, lib_df, threshold=threshold)
+        # 单一全局模型（兼容旧用法）
+        if selection.empty:
+            filtered = selection.assign(win_prob=pd.Series(dtype=float))
+        else:
+            model = WinModel(mp)
+            filtered = model.filter_selection(selection, lib_df, threshold=threshold)
 
     filtered_path = Path(str(out_path).replace(".csv", "_filtered.csv"))
     filtered.to_csv(filtered_path, index=False, encoding="utf-8-sig")

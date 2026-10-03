@@ -41,6 +41,7 @@ cache/
 # --- Jupyter ---
 .ipynb_checkpoints/
 *.ipynb_checkpoints
+*.ipynb
 
 # --- IDE / 编辑器 ---
 .idea/
@@ -70,5 +71,4 @@ logs/
 *.tmp
 *.bak
 
-*.ipynb_checkpoints
-*.ipynb
+data_library/_ctx/*

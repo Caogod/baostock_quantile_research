@@ -130,6 +130,54 @@ class DataFetcher:
         raise RuntimeError(f"获取{name}成分股失败（重试 {self.max_retries} 次）: {last_err}")
 
     # ------------------------------------------------------------------ #
+    # 元数据 / 指数行情（策略上下文用）
+    # ------------------------------------------------------------------ #
+    def get_stock_basic(self) -> pd.DataFrame:
+        """获取全部证券基本信息（带重试）。
+
+        返回列: code / code_name / ipoDate / outDate / type / status
+        type: 1=股票 2=指数 3=其它 4=可转债 5=ETF
+        """
+        last_err: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                rs = bs.query_stock_basic()
+                if rs.error_code == "0":
+                    rows = []
+                    while rs.next():
+                        rows.append(rs.get_row_data())
+                    if rows:
+                        return pd.DataFrame(rows, columns=rs.fields)
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+            if attempt < self.max_retries:
+                time.sleep(self.retry_delay)
+                self.relogin()
+        raise RuntimeError(f"获取证券基本信息失败（重试 {self.max_retries} 次）: {last_err}")
+
+    def get_index_history(self, code: str, start: str, end: str) -> pd.DataFrame:
+        """获取指数日线（不复权），返回列 date / close。"""
+        last_err: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                rs = bs.query_history_k_data_plus(
+                    code, "date,close",
+                    start_date=start, end_date=end,
+                    frequency="d", adjustflag="3",
+                )
+                if rs.error_code == "0":
+                    df = rs.get_data()
+                    if df is not None and not df.empty:
+                        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                        return df[["date", "close"]].dropna().reset_index(drop=True)
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+            if attempt < self.max_retries:
+                time.sleep(self.retry_delay)
+                self.relogin()
+        raise RuntimeError(f"获取指数 {code} 行情失败（重试 {self.max_retries} 次）: {last_err}")
+
+    # ------------------------------------------------------------------ #
     # 历史日 K（五价）
     # ------------------------------------------------------------------ #
     def get_history(

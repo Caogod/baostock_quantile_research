@@ -17,6 +17,40 @@ import pandas as pd
 from .data_fetcher import _NUMERIC_COLS
 
 
+def merge_libraries(
+    daily_paths: list[str | Path],
+    priority_paths: list[str | Path] | None = None,
+) -> pd.DataFrame:
+    """合并多个本地日 K 样本库为一张长表。
+
+    - 按 code 去重，同一只股票出现在多个库时，取 priority_paths（默认全部）
+      里靠前的库的数据；未出现在 priority 中的库按传入顺序作为备选来源。
+    - 合并前统一 date 为 str、数值列为 float，最终按 code + date 排序。
+    """
+    priority = [Path(p) for p in (priority_paths or [])]
+    rest = [Path(p) for p in daily_paths if p not in priority]
+
+    frames: list[pd.DataFrame] = []
+    for p in [*priority, *rest]:
+        df = pd.read_parquet(p)
+        if "date" in df.columns:
+            df["date"] = df["date"].astype(str)
+        for col in _NUMERIC_COLS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    # 优先级：priority 中的库依次优先，其次 rest。用 stable drop_duplicates
+    # 保证「靠前的库优先」——即 zz500 优先于 hs300。
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["code", "date"], keep="first")
+    merged = merged.sort_values(["code", "date"]).reset_index(drop=True)
+    return merged
+
+
 class LocalDataLibrary:
     def __init__(self, parquet_path: str | Path, meta_parquet_path: str | Path | None = None) -> None:
         self.parquet_path = Path(parquet_path)

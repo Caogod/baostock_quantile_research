@@ -3,7 +3,7 @@
 # 然后在此登记 name / script / params 即可，无需改动引擎代码。
 strategies:
   - name: ma_golden_cross
-    enabled: true
+    enabled: false
     script: strategies/ma_golden_cross.py
     params:
       short: 5
@@ -19,7 +19,7 @@ strategies:
 
   # ---- 分位筛选（基础）----
   - name: quantile_range
-    enabled: true
+    enabled: false
     script: strategies/quantile_range.py
     params:
       window: 60
@@ -28,7 +28,7 @@ strategies:
 
   # ---- 分位筛选 + 均线（在 quantile_range 基础上进一步判断）----
   - name: quantile_ma
-    enabled: true
+    enabled: false
     script: strategies/quantile_ma.py
     params:
       window: 60
@@ -39,7 +39,7 @@ strategies:
 
   # ---- 分位筛选 + 量能 t 检验（在 quantile_range 基础上判断量能显著放大）----
   - name: quantile_volume
-    enabled: true
+    enabled: false
     script: strategies/quantile_volume.py
     params:
       window: 60
@@ -50,7 +50,7 @@ strategies:
 
   # ---- 均线粘合 + 放量突破 ----
   - name: ma_breakout
-    enabled: true
+    enabled: false
     script: strategies/ma_breakout.py
     params:
       ma_short: 5
@@ -72,3 +72,45 @@ strategies:
       converge_pct: 0.03
       breakout_pct: 0.05
       min_turn: 10.0
+
+  # ---- B1 稳健超跌型（同花顺远航版公式移植）----
+  - name: b1_oversold
+    enabled: true
+    script: strategies/b1_oversold.py
+    params:
+      rsi_period: 6
+      rsi_max: 20.0
+      amp_min: 8.0          # CORE1 当日振幅下限(%)
+      amp_canbuy: 1.0       # CANBUY 当日振幅下限(%)
+      price_min: 20.0       # 收盘价下限（<=0 不启用）；用当前复权价
+      lu_window: 20         # 近 N 日无涨停
+      rmax_window: 60       # RMAX 窗口（排除 5% 涨跌幅限制的 ST 股）
+      zt_main: 1.095
+      zt_gem: 1.195
+      boards: "60,00,30"    # 仅主板/创业板，排除科创北交
+      exclude_st: true
+      min_listed_bars: 250  # 上市满 N 个交易日（0 不校验）
+      require_market_down: true
+      market_index: "399317"
+      min_bars: 65
+
+  # ---- 均线单次金叉突破 + 低波动 + 动量爆发 ----
+  - name: ma_cross_breakout
+    enabled: false
+    script: strategies/ma_cross_breakout.py
+    params:
+      lookback: 80
+      surge_days: 2
+      surge_pct: 0.05
+      turn_ma: 10
+      turn_ratio: 1.3
+      boll_ma: 20
+      boll_k: 3.0
+      vol_ratio_max: 0.26
+      # 波动窗口前用 MA5 连续下降修剪：跳过窗口头部下跌段，从停止下降处起算波动率
+      trim_decline: true
+      min_vol_days: 10
+      cross_ma_short: 5
+      cross_ma_mid: 10
+      cross_ma_long: 20
+      cross_ma_base: 60
