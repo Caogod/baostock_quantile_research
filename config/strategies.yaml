@@ -165,3 +165,20 @@ strategies:
       exclude_boards: "688" # 剔除板块前缀（科创板）
       min_bars: 65
       holding: 5
+
+  # ---- 上升趋势中的缩量阴线回调（起涨前夜型，来源：docs/起涨点前兆分析报告.md 的候选信号检验）----
+  # 注意：检验时的条件是在「站上 MA20 且 MA20 向上」之内成立的，故策略必须带上该位置约束
+  - name: ma20_pullback_shrink
+    enabled: true
+    script: strategies/ma20_pullback_shrink.py
+    params:
+      ma_long: 20           # 趋势基准均线
+      pct_max: -2.61        # 当日涨跌幅上限(%)，≤该值才入选
+      vol_ratio_max: 0.90   # 量比上限（量 / 前 N 日均量）
+      vol_ma_window: 5      # 量比所用均量窗口
+      vol_include_today: true  # 均量含当日（与分析脚本口径一致；false 为A股常规量比）
+      exclude_st: true
+      exclude_boards: "688"
+      min_listed_days: 180
+      min_bars: 20          # 只需 MA20+5 根；刻意不取 65，以便回测样本贴合分析口径
+      holding: 5
