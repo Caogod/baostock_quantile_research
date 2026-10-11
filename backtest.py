@@ -143,17 +143,23 @@ def main() -> int:
             fetcher.logout()
 
     # ---- 汇总与落盘 ----
-    detail, summary, combined, signals = summarize(all_trades, all_signals)
+    detail, summary, combined, signals, windows = summarize(all_trades, all_signals)
     out_dir = Path(settings.get("app", {}).get("backtest_output_dir", "backtest_output"))
-    paths = write_outputs(detail, summary, combined, signals, out_dir, args.start, args.end)
+    paths = write_outputs(detail, summary, combined, signals, out_dir, args.start, args.end, windows)
 
     print(f"\n===== 信号总数：{len(signals)}，交易总数：{len(detail)} =====")
     print("\n===== 策略 × 数据源 × 持仓周期 =====")
     print(summary.to_string(index=False) if not summary.empty else "(无交易)")
     print("\n===== 策略 × 持仓周期（跨数据源合并）=====")
     print(combined.to_string(index=False) if not combined.empty else "(无交易)")
+    if not windows.empty:
+        wide_cols = ["strategy", "holding_days", "window", "window_start", "window_end",
+                     "total_trades", "win_rate", "avg_return_pct", "median_return_pct",
+                     "std_return_pct", "p25_return_pct", "p75_return_pct", "avg_excess_pct"]
+        print("\n===== 时间段分组对比（最近 30/90/180 日，按信号日切分）=====")
+        print(windows[wide_cols].to_string(index=False))
     print("\n输出文件:")
-    for key in ("detail", "summary", "combined", "signals"):
+    for key in ("detail", "summary", "combined", "signals", "windows"):
         print(f"  {key:9s}: {paths[key]}")
     return 0
 

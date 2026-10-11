@@ -11,6 +11,8 @@
   Sharpe / Sortino / 最大回撤。
 - 交易冷却期：同一股票同一策略，入场后冷却 holding 个交易日（= 持有期），
   平仓前不再产生新信号，避免同一标的在持有期内被重复计入。
+- 时间段分组对比：同一批交易按信号日距回溯结束日的天数切成
+  最近 30 / 90 / 180 日子样本，分别统计胜率与收益分布。
 
 成交口径（贯穿始终，不做任何简化）：
     T 日收盘生成信号 → T+1 开盘价入场 → 持有 H 个交易日后收盘卖出，
@@ -24,7 +26,7 @@
 用法（入口见 backtest.py）：
     bt = Backtester(LocalDataLibrary(path), settings, library_name="zz500")
     bt.run(strategies, "2025-11-12", "2026-09-30", holdings=[3, 5, 10])
-    detail, summary, combined, signals = summarize(bt.trades, holdings)
+    detail, summary, combined, signals, windows = summarize(bt.trades, holdings)
 """
 from __future__ import annotations
 
@@ -179,7 +181,14 @@ class Backtester:
                     # 信号在 T 日收盘后生成（sub 含截至 T 日的全部数据）
                     try:
                         sig = strat.signal(df.iloc[: i + 1])
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
+                        # 契约要求 signal 用 _no_signal 表达"不入选"，不应抛异常。
+                        # 一旦抛出说明策略实现有 bug（如字段缺失/索引越界），
+                        # 静默跳过会变成"悄悄漏信号"，故显式告警只报一次。
+                        if not getattr(self, "_signal_err_warned", False):
+                            self._signal_err_warned = True
+                            print(f"[warn] {strat_name} signal() 抛异常，该日跳过："
+                                  f"{type(exc).__name__}: {exc}")
                         continue
                     if not sig.get("buy"):
                         continue
@@ -368,14 +377,20 @@ def _metrics(grp: pd.DataFrame, holding_days: int, calendar: list[str] | None = 
 def summarize(
     trades: Iterable[dict],
     signals: Iterable[dict] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """把运行期累积的交易/信号转为四张表。
+    window_days: Sequence[int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """把运行期累积的交易/信号转为五张表。
 
-    返回 (detail, summary, combined, signals)：
+    返回 (detail, summary, combined, signals, windows)：
         detail   : 逐笔明细（含基准与超额收益）
         summary  : 策略 × 数据源 × 持仓周期
         combined : 策略 × 持仓周期（跨数据源合并）
         signals  : 信号日志
+        windows  : 策略 × 持仓周期 × 时间段（最近 N 日）分组对比
+
+    window_days：时间段分组的窗口天数列表，默认 (30, 90, 180)。分组口径为
+    「信号日 >= 全样本最后信号日 - (N-1) 天」，即各窗口均以样本末尾为终点，
+    窗口之间是嵌套包含关系（180 日含 90 日含 30 日），便于观察近期衰减。
     """
     detail = pd.DataFrame(list(trades))
     signals_df = pd.DataFrame(list(signals or []))
@@ -407,6 +422,8 @@ def summarize(
             row.update(_metrics(grp, int(h), calendar))
             rows_combined.append(row)
 
+    windows = _window_breakdown(detail, window_days or (30, 90, 180), calendar)
+
     summary = pd.DataFrame(rows)
     combined = pd.DataFrame(rows_combined)
     if not summary.empty:
@@ -416,7 +433,77 @@ def summarize(
 
     if signals_df.empty and not signals_df.columns.tolist():
         signals_df = pd.DataFrame(columns=SIGNAL_COLUMNS)
-    return detail, summary, combined, signals_df
+    return detail, summary, combined, signals_df, windows
+
+
+# 时间段分组输出的列（比 summary 精简，突出胜率与收益分布）
+WINDOW_COLUMNS = [
+    "strategy", "holding_days", "window", "window_start", "window_end",
+    "total_trades", "win_count", "win_rate", "excess_win_rate",
+    "avg_return_pct", "median_return_pct", "std_return_pct",
+    "p25_return_pct", "p75_return_pct", "max_return_pct", "min_return_pct",
+    "avg_excess_pct",
+]
+
+
+def _window_breakdown(
+    detail: pd.DataFrame,
+    windows: Sequence[int],
+    calendar: list[str] | None = None,
+) -> pd.DataFrame:
+    """按「信号日距样本末端的自然日距离」把交易切进最近 N 日的时间段。
+
+    每个窗口以样本最后一个信号日为终点向前推 N 个自然日；窗口之间为嵌套
+    关系（180 ⊃ 90 ⊃ 30），用于观察策略在近期/中期/更早的表现差异。
+    输出每行 = 策略 × 持仓周期 × 时间段，含胜率与收益分布分位数。
+    """
+    if detail.empty or "signal_date" not in detail.columns:
+        return pd.DataFrame(columns=WINDOW_COLUMNS)
+
+    d = detail.copy()
+    d["_sig"] = pd.to_datetime(d["signal_date"].astype(str), errors="coerce")
+    d = d[d["_sig"].notna()]
+    if d.empty:
+        return pd.DataFrame(columns=WINDOW_COLUMNS)
+
+    last_day = d["_sig"].max()
+    rows: list[dict] = []
+    for (strat_name, h), grp in d.groupby(["strategy", "holding_days"]):
+        for w in sorted(int(x) for x in windows):
+            start = last_day - pd.Timedelta(days=w - 1)
+            sub = grp[grp["_sig"] >= start]
+            if sub.empty:
+                continue
+            m = _metrics(sub, int(h), calendar)
+            ret = sub["return_pct"].astype(float)
+            rows.append({
+                "strategy": strat_name,
+                "holding_days": int(h),
+                "window": f"最近{w}日",
+                "window_start": start.strftime("%Y-%m-%d"),
+                "window_end": last_day.strftime("%Y-%m-%d"),
+                "total_trades": m["total_trades"],
+                "win_count": m["win_count"],
+                "win_rate": m["win_rate"],
+                "excess_win_rate": m["excess_win_rate"],
+                "avg_return_pct": m["avg_return_pct"],
+                "median_return_pct": m["median_return_pct"],
+                "std_return_pct": round(float(ret.std(ddof=1)), 4) if len(ret) > 1 else 0.0,
+                "p25_return_pct": round(float(ret.quantile(0.25)), 4),
+                "p75_return_pct": round(float(ret.quantile(0.75)), 4),
+                "max_return_pct": m["max_return_pct"],
+                "min_return_pct": m["min_return_pct"],
+                "avg_excess_pct": m["avg_excess_pct"],
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=WINDOW_COLUMNS)
+    # 按窗口天数排序（30 → 90 → 180），而非字符串序
+    order = {f"最近{int(w)}日": i for i, w in enumerate(sorted(int(x) for x in windows))}
+    out["_ord"] = out["window"].map(order).fillna(99)
+    out = (out.sort_values(["strategy", "holding_days", "_ord"])
+              .drop(columns="_ord").reset_index(drop=True))
+    return out[WINDOW_COLUMNS]
 
 
 def write_outputs(
@@ -427,8 +514,9 @@ def write_outputs(
     output_dir: Path | str,
     start_date: str,
     end_date: str,
+    windows: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
-    """落盘四份 CSV，返回 {名称: 路径}。"""
+    """落盘五份 CSV，返回 {名称: 路径}。"""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -436,9 +524,12 @@ def write_outputs(
         "summary": out / f"backtest_summary_{start_date}_{end_date}.csv",
         "combined": out / f"backtest_combined_{start_date}_{end_date}.csv",
         "signals": out / f"backtest_signals_{start_date}_{end_date}.csv",
+        "windows": out / f"backtest_windows_{start_date}_{end_date}.csv",
     }
     detail.to_csv(paths["detail"], index=False, encoding="utf-8-sig")
     summary.to_csv(paths["summary"], index=False, encoding="utf-8-sig")
     combined.to_csv(paths["combined"], index=False, encoding="utf-8-sig")
     signals.to_csv(paths["signals"], index=False, encoding="utf-8-sig")
+    if windows is not None:
+        windows.to_csv(paths["windows"], index=False, encoding="utf-8-sig")
     return paths
