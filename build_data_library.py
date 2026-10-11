@@ -157,7 +157,11 @@ def _build_one_index(
     full: bool,
     fetcher: DataFetcher,
 ) -> int:
-    """构建/增量更新单个指数库。返回 0 成功。复用同一 fetcher 连接。"""
+    """构建/增量更新单个指数库。返回**本次新增行数**（0 表示无新增/已最新）。
+
+    复用同一 fetcher 连接。调用方可据此判断是否需要重新合并统一库，
+    避免库无变化时反复做昂贵的合并。
+    """
     daily_parquet = DATA_DIR / f"{index}_daily.parquet"
     meta_parquet = DATA_DIR / f"{index}_stocks.parquet"
     meta_json = DATA_DIR / f"{index}_meta.json"
@@ -207,33 +211,37 @@ def _build_one_index(
                     skipped_price += 1
                 fetcher._throttle()
 
+            new_rows = int(sum(len(f) for f in new_frames))
             if new_frames:
                 merged = pd.concat([existing_daily, *new_frames], ignore_index=True)
                 merged = merged.sort_values(["code", "date"]).reset_index(drop=True)
                 merged.to_parquet(daily_parquet, index=False)
             else:
                 print("无新增行情数据需要补齐")
+            final_daily = merged if new_frames else existing_daily
 
             constituents.to_parquet(meta_parquet, index=False)
             meta = {
                 "index": INDEX_NAMES[index],
                 "index_code": index,
-                "stocks": int(merged["code"].nunique()) if "merged" in locals() else int(existing_daily["code"].nunique()),
+                "stocks": int(final_daily["code"].nunique()),
                 "constituents": int(len(codes)),
                 "date_range": [
-                    _latest_record_date(existing_daily) if "merged" not in locals() else pd.to_datetime(merged["date"]).min().strftime("%Y-%m-%d"),
-                    latest_trade,
+                    # 用落库后的实际最小/最大日期，避免无新增时把起始日记成"原库最后一天"
+                    pd.to_datetime(final_daily["date"]).min().strftime("%Y-%m-%d"),
+                    pd.to_datetime(final_daily["date"]).max().strftime("%Y-%m-%d"),
                 ],
                 "price_range": [price_min, price_max],
                 "price_filtered_out": skipped_price,
                 "build_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "rows": int((merged if "merged" in locals() else existing_daily).shape[0]),
+                "rows": int(final_daily.shape[0]),
                 "format": "parquet",
                 "incremental_update": True,
             }
             meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"补全完成: {daily_parquet}，最新交易日 {latest_trade}")
-            return 0
+            print(f"补全完成: {daily_parquet}，最新交易日 {latest_trade}"
+                  f"（新增 {new_rows} 行）")
+            return new_rows
 
     # 3. 全量重建（原逻辑）
     today = datetime.now()
@@ -310,7 +318,79 @@ def _build_one_index(
     print(f"完成: {daily_parquet}")
     print(f"  {meta['stocks']} 只股票 × 最多 {len(window)} 交易日 = {len(daily)} 行"
           f"（价格剔除 {skipped_price} 只）")
-    return 0
+    return int(len(daily))
+
+
+def update_libraries(
+    indexes: list[str] | None = None,
+    days: int = 200,
+    price_min: float = 2.0,
+    price_max: float = 300.0,
+    request_interval: float = 0.08,
+    do_combine: bool = True,
+    fetcher: DataFetcher | None = None,
+) -> dict:
+    """增量更新本地样本库（默认 zz500 + hs300）并合并为统一库。
+
+    供 main.py / scheduler.py 复用，实现「跑选股时顺带把本地库补到最新」。
+    每个指数库只对缺失的交易日做增量补齐：若已到最新交易日则直接跳过
+    （几乎无网络开销），因此可安全地每次运行都调用。
+
+    fetcher: 可选。传入已 login 的 DataFetcher 时复用该连接（不再重复
+    login/logout）；为 None 时内部自建并在结束时关闭。
+
+    返回 dict: {"updated": bool, "indexes": [...], "meta": combined_meta 或 None}
+    """
+    names = indexes or list(COMBINE_ORDER)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    combined_path = DATA_DIR / f"{COMBINE_NAME}_daily.parquet"
+
+    result: dict = {"updated": False, "indexes": [], "meta": None, "new_rows": 0}
+
+    # 快速跳过：统一库已覆盖到今天（或不晚于今天）时，连联网检查都省掉。
+    # 避免每次运行都做「读取成分股 + 查询最新交易日 + 重新合并」的空转开销。
+    if combined_path.exists():
+        try:
+            last = _latest_record_date(pd.read_parquet(combined_path, columns=["date"]))
+        except Exception:  # noqa: BLE001
+            last = None
+        if last and last >= datetime.now().strftime("%Y-%m-%d"):
+            print(f"[update] 统一库已到 {last}（不早于今天），无需更新")
+            return result
+
+    owned = fetcher is None
+    if owned:
+        fetcher = DataFetcher(request_interval=request_interval)
+        fetcher.login()
+
+    try:
+        total_new = 0
+        for idx in names:
+            if idx not in INDEX_NAMES:
+                print(f"[update] 不支持的指数，跳过: {idx}")
+                continue
+            total_new += _build_one_index(idx, days, price_min, price_max,
+                                          request_interval, False, fetcher)
+            result["indexes"].append(idx)
+        result["new_rows"] = total_new
+
+        if do_combine:
+            needed = [(DATA_DIR / f"{n}_daily.parquet").exists() for n in COMBINE_ORDER]
+            if not all(needed):
+                missing = [n for n, ok in zip(COMBINE_ORDER, needed) if not ok]
+                print(f"[update] 源库不全（缺 {missing}），跳过合并")
+            elif total_new == 0 and combined_path.exists():
+                # 无新增数据且统一库已存在：不做昂贵的重复合并
+                print(f"[update] 无新增行情，沿用现有统一库 {combined_path.name}")
+            else:
+                result["meta"] = combine_libraries(COMBINE_ORDER)
+                result["updated"] = True
+                print(f"[update] 统一库已就绪: {result['meta']['date_range']} "
+                      f"/ {result['meta']['stocks']} 只 / {result['meta']['rows']} 行")
+    finally:
+        if owned:
+            fetcher.logout()
+    return result
 
 
 def main() -> int:

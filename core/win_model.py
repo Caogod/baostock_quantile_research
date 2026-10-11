@@ -39,18 +39,17 @@ class WinModel:
         """对特征 DataFrame 预测盈利概率（0~1）。"""
         return pd.Series(self.model.predict_proba(feat_df[self.features].values)[:, 1])
 
-    def filter_selection(
+    def score_selection(
         self,
         selection_df: pd.DataFrame,
         library: pd.DataFrame,
-        threshold: float = 0.5,
     ) -> pd.DataFrame:
-        """对选股结果逐行计算胜率，返回含 win_prob 列、并按阈值过滤后的结果。
+        """对选股结果逐行计算胜率，返回**全量**含 win_prob 列的结果（不做阈值过滤）。
 
         selection_df 需含列: code, date（选股日期）。
         """
         if selection_df.empty:
-            return selection_df.assign(win_prob=[])
+            return selection_df.assign(win_prob=pd.Series(dtype=float))
 
         probs = []
         for _, row in selection_df.iterrows():
@@ -62,7 +61,18 @@ class WinModel:
 
         out = selection_df.copy()
         out["win_prob"] = probs
-        out = out.sort_values("win_prob", ascending=False).reset_index(drop=True)
+        return out.sort_values("win_prob", ascending=False).reset_index(drop=True)
+
+    def filter_selection(
+        self,
+        selection_df: pd.DataFrame,
+        library: pd.DataFrame,
+        threshold: float = 0.5,
+    ) -> pd.DataFrame:
+        """打分后按阈值过滤，仅保留 win_prob >= threshold 的记录。"""
+        out = self.score_selection(selection_df, library)
+        if out.empty:
+            return out
         return out[out["win_prob"] >= threshold]
 
 
@@ -88,15 +98,18 @@ class WinModelSet:
             return self.models[strategy]
         return None
 
-    def filter_selection(
+    def score_selection(
         self,
         selection_df: pd.DataFrame,
         library: pd.DataFrame,
-        threshold: float = 0.5,
     ) -> tuple[pd.DataFrame, set[str]]:
-        """逐策略过滤。返回 (过滤后结果, 缺失模型的策略集合)。"""
+        """逐策略打分，返回 (**全量**含 win_prob 的结果, 缺失模型的策略集合)。
+
+        与 filter_selection 的区别：不做阈值过滤，保留全部信号及其预测胜率，
+        便于把 win_prob 回写到原始选股结果（例如写入持仓账本做效果归因）。
+        """
         if selection_df.empty:
-            return selection_df.assign(win_prob=[]), set()
+            return selection_df.assign(win_prob=pd.Series(dtype=float)), set()
 
         missing: set[str] = set()
         probs: list[float] = []
@@ -116,6 +129,18 @@ class WinModelSet:
         out = selection_df.copy()
         out["win_prob"] = probs
         out = out.sort_values("win_prob", ascending=False).reset_index(drop=True)
+        return out, missing
+
+    def filter_selection(
+        self,
+        selection_df: pd.DataFrame,
+        library: pd.DataFrame,
+        threshold: float = 0.5,
+    ) -> tuple[pd.DataFrame, set[str]]:
+        """逐策略打分后按阈值过滤。返回 (过滤后结果, 缺失模型的策略集合)。"""
+        out, missing = self.score_selection(selection_df, library)
+        if out.empty:
+            return out, missing
         return out[out["win_prob"] >= threshold], missing
 
 
@@ -124,6 +149,7 @@ def apply_filter(
     library_path: str | Path,
     model_path: str | Path = "models/win_model.joblib",
     threshold: float = 0.5,
+    scored_path: str | Path | None = None,
 ) -> tuple[Path, int, int, pd.DataFrame]:
     """选股结果二次过滤（公共入口，供 main.py 与 scheduler.py 复用）。
 
@@ -134,6 +160,10 @@ def apply_filter(
       某策略无对应模型时跳过（保留其他策略的过滤结果），并打印告警。
     - 文件：单一全局模型，对所有策略共用（向后兼容）。
 
+    scored_path: 可选。若给出，额外写出**全量打分结果**（含 win_prob 列，
+    不做阈值过滤）。main.py 传原始选股路径时即把 win_prob 回写进原始结果，
+    供持仓账本等下游消费。
+
     返回 (过滤后路径, 原始数量, 保留数量, 过滤结果 DataFrame)。
     """
     selection = pd.read_csv(out_path)
@@ -141,25 +171,33 @@ def apply_filter(
     lib_df = pd.read_parquet(library_path).sort_values("date") if not selection.empty else pd.DataFrame()
 
     mp = Path(model_path)
+    scored: pd.DataFrame | None = None
     if mp.is_dir():
         # 每策略独立模型
         strategies = sorted(selection["strategy"].dropna().astype(str).unique()) if not selection.empty else []
         model_set = WinModelSet(mp, strategies=strategies)
         if selection.empty:
-            filtered = selection.assign(win_prob=pd.Series(dtype=float))
+            scored = selection.assign(win_prob=pd.Series(dtype=float))
             missing = set()
         else:
-            filtered, missing = model_set.filter_selection(selection, lib_df, threshold=threshold)
+            scored, missing = model_set.score_selection(selection, lib_df)
         if missing:
             print(f"[filter] 以下策略缺少独立模型，已跳过: {sorted(missing)}")
     else:
         # 单一全局模型（兼容旧用法）
         if selection.empty:
-            filtered = selection.assign(win_prob=pd.Series(dtype=float))
+            scored = selection.assign(win_prob=pd.Series(dtype=float))
         else:
-            model = WinModel(mp)
-            filtered = model.filter_selection(selection, lib_df, threshold=threshold)
+            scored = WinModel(mp).score_selection(selection, lib_df)
+
+    filtered = scored[scored["win_prob"] >= threshold] if not scored.empty else scored
 
     filtered_path = Path(str(out_path).replace(".csv", "_filtered.csv"))
     filtered.to_csv(filtered_path, index=False, encoding="utf-8-sig")
+
+    if scored_path is not None:
+        sp = Path(scored_path)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        scored.to_csv(sp, index=False, encoding="utf-8-sig")
+
     return filtered_path, len(selection), len(filtered), filtered

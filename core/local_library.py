@@ -101,11 +101,22 @@ class LocalDataLibrary:
         return df.reset_index(drop=True)
 
     def get_all_stocks(self, day: str | None = None) -> pd.DataFrame:
-        """返回库内全部证券列表（code / tradeStatus / code_name）。"""
+        """返回库内全部证券列表（code / tradeStatus / code_name）。
+
+        code_name 取值优先级：meta 证券列表 → 日线表自带列。后者是必要的
+        兜底——调用方常常不传 meta_parquet_path，若只认 meta 会导致股票名全空，
+        选股结果与账本的 code_name 列随之失效。
+        """
         codes = sorted(self.daily["code"].unique().tolist())
         name_map: dict[str, Any] = {}
         if self.meta is not None and {"code", "code_name"}.issubset(self.meta.columns):
             name_map = dict(zip(self.meta["code"], self.meta["code_name"]))
+        missing = [c for c in codes if c not in name_map or pd.isna(name_map.get(c, "")) or str(name_map.get(c, "")).strip() == ""]
+        if missing and "code_name" in self.daily.columns:
+            sub = self.daily[self.daily["code"].isin(missing)][["code", "code_name"]].dropna()
+            for code, name in zip(sub["code"], sub["code_name"]):
+                if str(name).strip():
+                    name_map[code] = name
         return pd.DataFrame({
             "code": codes,
             "tradeStatus": ["1"] * len(codes),

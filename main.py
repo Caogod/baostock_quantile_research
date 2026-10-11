@@ -24,6 +24,27 @@ from core.selector import Selector
 from core.strategy_loader import load_strategies, load_yaml
 
 
+def _auto_update_library(existing_fetcher: DataFetcher | None = None) -> None:
+    """选股前把本地合并库增量补到最新交易日（失败不影响选股主流程）。
+
+    仅在库确实落后于最新交易日时才真正下载；已最新时几乎无网络开销。
+    """
+    from build_data_library import update_libraries
+
+    print("\n[更新本地库] 检查是否需要增量补全…")
+    try:
+        res = update_libraries(fetcher=existing_fetcher)
+        if res.get("meta"):
+            print(f"[更新本地库] 完成，范围 {res['meta']['date_range']}"
+                  f"（新增 {res.get('new_rows', 0)} 行）")
+        elif res.get("indexes"):
+            print("[更新本地库] 已是最新，无新增行情")
+        else:
+            print("[更新本地库] 已跳过（源库不全或无需更新）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 本地库更新失败，继续用现有库选股: {exc}", file=sys.stderr)
+
+
 def _configure_index_pool(fetcher: DataFetcher, settings: dict) -> None:
     """将配置的指数成分股合并为去重后的显式股票池。"""
     data_cfg = settings.setdefault("data", {})
@@ -61,6 +82,8 @@ def main() -> int:
                         help="胜率模型目录（--filter 时按策略加载 win_model_<strategy>.joblib）")
     parser.add_argument("--filter-threshold", type=float, default=0.5,
                         help="二次过滤的胜率阈值（默认 0.5）")
+    parser.add_argument("--no-update-library", dest="update_library", action="store_false",
+                        help="跳过运行前的本地样本库增量更新（默认每次运行都会更新）")
     args = parser.parse_args()
 
     settings = load_yaml(args.config)
@@ -81,6 +104,19 @@ def main() -> int:
 
     try:
         fetcher.login()
+
+        # 模块0：选股前把本地合并库增量补到最新交易日（默认开启）。
+        # 联网模式复用当前连接；--local 模式内部自建连接，更新完重新加载库，
+        # 这样离线选股用的也是刚补上的最新数据。
+        if args.update_library:
+            _auto_update_library(None if args.local else fetcher)
+            if args.local:
+                fetcher.logout()
+                fetcher = LocalDataLibrary(args.library)
+                fetcher.login()
+                print(f"[local] 更新后样本库范围: {fetcher.date_range}")
+                as_of_date = args.date or fetcher.date_range[1]
+
         if not args.local:
             _configure_index_pool(fetcher, settings)
             as_of_date = args.date or fetcher.latest_trading_day()
@@ -100,14 +136,18 @@ def main() -> int:
         if args.filter:
             from core.win_model import apply_filter
 
+            # scored_path=out_path：把全量 win_prob 回写进原始选股结果，
+            # 使持仓账本能记录每笔信号的预测胜率（含被过滤掉的低概率信号）。
             filtered_path, n_before, n_after, filtered = apply_filter(
                 out_path,
                 library_path=args.library,
                 model_path=args.model,
                 threshold=args.filter_threshold,
+                scored_path=out_path,
             )
             print(f"二次过滤完成: 原始 {n_before} 只 → 保留 {n_after} 只"
                   f"（阈值 {args.filter_threshold}），输出 {filtered_path}")
+            print(f"预测胜率(win_prob)已回写至: {out_path}")
             if not filtered.empty:
                 print(filtered[["code", "code_name", "win_prob", "close"]].to_string(index=False))
 
