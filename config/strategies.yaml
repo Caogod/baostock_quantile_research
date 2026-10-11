@@ -123,3 +123,45 @@ strategies:
       cross_ma_long: 20
       cross_ma_base: 60
       holding: 5
+
+  # ---- 趋势缩量回调 + 资金流入（13 条条件筛选）----
+  # 主力资金净流入：baostock 无个股资金流数据，用「收盘日内位置 × 放量倍数」量价代理
+  # 流通市值：用 volume / (turn/100) × close 反推（实测反推股本变异系数 <0.05%）
+  - name: trend_pullback_inflow
+    enabled: false
+    script: strategies/trend_pullback_inflow.py
+    params:
+      ma_long: 20           # 收盘价站上该均线
+      ma_trend: 20          # 该均线向上（今日 > 昨日）
+      ma_short: 5           # 短期均线
+      ma_mid: 10            # 中期均线，要求 ma_short > ma_mid
+      max_pct_chg: 6.0      # 当日涨幅上限(%)
+      vol_shrink_window: 5  # 当日量 < 前 N 日均量
+      vol_max_window: 20    # 当日量 < 前 N 日最大量
+      inflow_window: 3      # 资金流入代理的近 N 日求和窗口
+      turn_min: 3.0         # 换手率下限(%)
+      turn_max: 12.0        # 换手率上限(%)
+      range_window: 20      # 区间涨跌幅窗口
+      range_max: 35.0       # 区间涨跌幅上限(±%)
+      bias_window: 60       # 乖离率窗口
+      bias_max: 25.0        # 乖离率上限(±%)
+      float_mv_min: 30.0    # 流通市值下限(亿元)
+      float_mv_max: 600.0   # 流通市值上限(亿元)
+      amount_window: 20     # 日均成交额窗口
+      amount_min: 1.0       # 日均成交额下限(亿元)
+      min_listed_days: 180  # 上市天数下限
+      min_bars: 65
+      holding: 5
+
+  # ---- 连续5日收阳 + 5日累计涨幅>20%（动量加速）----
+  - name: consecutive_up5
+    enabled: true
+    script: strategies/consecutive_up5.py
+    params:
+      window: 5             # 连续上涨天数与累计涨幅窗口
+      min_gain_pct: 20.0    # 窗口内累计涨幅下限(%)
+      exclude_st: true      # 剔除 ST / 退市
+      min_listed_days: 180  # 上市天数下限（自然日，0 不校验）
+      exclude_boards: "688" # 剔除板块前缀（科创板）
+      min_bars: 65
+      holding: 5

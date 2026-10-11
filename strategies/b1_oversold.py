@@ -20,6 +20,25 @@
     CANBUY := NOTYZ AND NOTSEAL AND NOT5 AND AMP > 1;
     XG: NOTST AND ISAB AND LISTED AND CORE1 AND CORE2 AND CANBUY;
 
+【条件顺序：按过滤代价由低到高手工排定（2026-10-12 取消向量化预筛）】
+    全部条件为 AND 关系，顺序不影响判定结果，只影响性能：越靠前越便宜、
+    越早短路。代价评估与排定后的执行次序：
+        1. 板块前缀            常量，逐股判定
+        2. ST / 退市           常量（逐日 isST）
+        3. 上市满 N 个交易日   meta 查表
+        4. 振幅 > amp_min      O(1) 末行 high/low/last_lc
+        5. 振幅 > amp_canbuy   O(1)，阈值更松
+        6. 收盘价 > price_min  O(1)
+        7. 连跌 2 日           O(1)
+        8. 非一字板            O(1)
+        9. 未封涨停            O(1)
+       10. 指数下跌            O(1) 指数查表
+       11. 近20日无涨停        O(20) 定长切片
+       12. RMAX60 非5%限制股   O(60) 定长切片
+       13. RSI6 < rsi_max      EWM 全序列（最贵）→ 放最后
+    其中 RSI6 是原先最靠前的开销大头，改为最后执行后，只在其余条件全部通过的
+    极少数候选日才触发 EWM 计算。
+
 移植说明（与原公式的三处口径差异）：
 1. ST 判定：优先用日线自带的 `isST` 字段（baostock 逐日标记，**无前视偏差**）；
    该字段缺失时回退为 code_name 含 ST/退（当前名称，存在前视偏差）。
@@ -154,24 +173,55 @@ class Strategy(BaseStrategy):
         close = df["close"].astype(float).reset_index(drop=True)
         high = df["high"].astype(float).reset_index(drop=True)
         low = df["low"].astype(float).reset_index(drop=True)
-        lc = close.shift(1)                      # REF(CLOSE, 1)
-        ratio = close / close.shift(1)           # ratio[j] = close[j]/close[j-1]
         i = n - 1
 
         zt = zt_gem if (num.startswith("30") or num.startswith("688")) else zt_main
 
-        # ---- CORE1：RSI6 < 20 AND 振幅 > 8% AND 收盘 > 20 ----
-        rsi = float(_rsi(close, rsi_period).iloc[i])
         last_close = float(close.iloc[i])
-        last_lc = float(lc.iloc[i])
-        amp = (float(high.iloc[i]) - float(low.iloc[i])) / last_lc * 100.0
-        core1 = (rsi < rsi_max) and (amp > amp_min) and (price_min <= 0 or last_close > price_min)
+        last_lc = float(close.iloc[i - 1])       # REF(CLOSE, 1)
+        last_high = float(high.iloc[i])
+        last_low = float(low.iloc[i])
+        if last_lc <= 0:
+            return self._no_signal("前收为0，振幅不可计算")
 
-        # ---- CORE2：近20日无涨停 AND 连跌2日 AND 当日全市场下跌 ----
-        win_lu = ratio.iloc[i - lu_window:i]          # 对应 REF(C,1)/REF(C,2) 的 20 个取值
-        nolu = not bool((win_lu >= zt).any())
-        cd2 = bool(close.iloc[i] < close.iloc[i - 1] and close.iloc[i - 1] < close.iloc[i - 2])
+        # ============================================================== #
+        # 条件顺序：按「过滤代价」由低到高手工排定（2026-10-12 取消向量化预筛）
+        # 全部条件为 AND 关系，顺序不影响判定结果，只影响性能：越靠前越便宜，
+        # 一旦不满足即提前 return，昂贵的计算只留给少数候选日。
+        # 代价评估：
+        #   O(1) 末行/相邻行取值  → 振幅、收盘价、连跌2日、一字板、未封板、指数查表
+        #   O(20)/O(60) 定长切片  → 近20日无涨停、RMAX60
+        #   EWM 全序列（最贵）    → RSI6，因此放最后，只在其余条件全通过后才计算
+        # ============================================================== #
 
+        # ---- 1) 振幅（O(1)，同时服务 CORE1 的 amp_min 与 CANBUY 的 amp_canbuy）----
+        amp = (last_high - last_low) / last_lc * 100.0
+        if amp <= amp_min:
+            return self._no_signal(f"振幅{amp:.1f}%未达{amp_min}%")
+        if amp <= amp_canbuy:
+            return self._no_signal(f"振幅{amp:.1f}%未达{amp_canbuy}%（CANBUY）")
+
+        # ---- 2) 收盘价下限（O(1)）----
+        if price_min > 0 and last_close <= price_min:
+            return self._no_signal(f"收盘{last_close:.2f}未达{price_min}")
+
+        # ---- 3) 连跌 2 日（O(1)）----
+        prev1 = float(close.iloc[i - 1])
+        prev2 = float(close.iloc[i - 2])
+        if not (last_close < prev1 and prev1 < prev2):
+            return self._no_signal("未连跌2日")
+
+        # ---- 4) 非一字板（O(1)）----
+        notyz = last_high > last_low * 1.0001
+        if not notyz:
+            return self._no_signal("一字板")
+
+        # ---- 5) 未封涨停（O(1)）----
+        notseal = last_close < last_lc * zt - 0.005
+        if not notseal:
+            return self._no_signal("收盘已封涨停")
+
+        # ---- 6) 当日全市场下跌（指数查表，O(1)）----
         if require_market_down:
             md = getattr(self, "_market_down", None)
             if md is None:
@@ -184,23 +234,27 @@ class Strategy(BaseStrategy):
             if mktdn_val is None or pd.isna(mktdn_val):
                 return self._no_signal(f"{day} 无指数行情")
             mktdn = bool(mktdn_val)
+            if not mktdn:
+                return self._no_signal(f"{day} 指数未收跌")
         else:
             mktdn = True
-        core2 = nolu and cd2 and mktdn
 
-        # ---- CANBUY：非一字板 AND 未封涨停 AND 非5%限制股 AND 振幅>1 ----
-        notyz = float(high.iloc[i]) > float(low.iloc[i]) * 1.0001
-        notseal = last_close < last_lc * zt - 0.005
+        # ---- 7) 近 lu_window 日无涨停（O(20) 定长切片）----
+        ratio = close / close.shift(1)           # ratio[j] = close[j]/close[j-1]
+        win_lu = ratio.iloc[i - lu_window:i]     # REF(C,1)/REF(C,2) 的 20 个取值
+        if bool((win_lu >= zt).any()):
+            return self._no_signal(f"近{lu_window}日内出现涨停")
+
+        # ---- 8) RMAX60：排除 5% 涨跌幅限制股（O(60) 定长切片）----
         rmax = float((ratio.iloc[i - rmax_window:i] - 1.0).abs().max())
         not5 = not (0.047 <= rmax <= 0.053)
-        canbuy = notyz and notseal and not5 and (amp > amp_canbuy)
+        if not not5:
+            return self._no_signal(f"疑为5%涨跌幅限制股(RMAX{rmax:.2%})")
 
-        if not (core1 and core2 and canbuy):
-            return self._no_signal(
-                f"RSI{rsi_period}={rsi:.1f}(<{rsi_max}?{rsi < rsi_max})；"
-                f"振幅{amp:.1f}%；连跌2日={cd2}；近{lu_window}日无涨停={nolu}；"
-                f"指数下跌={mktdn}；非一字板={notyz}；未封板={notseal}；RMAX{rmax:.2%}"
-            )
+        # ---- 9) RSI6 < rsi_max（最贵：EWM 全序列；放在最后，仅少数候选日执行）----
+        rsi = float(_rsi(close, rsi_period).iloc[i])
+        if pd.isna(rsi) or not (rsi < rsi_max):
+            return self._no_signal(f"RSI{rsi_period}={rsi:.1f}未低于{rsi_max}")
 
         score = round(amp + (rsi_max - rsi), 4)
         return {
@@ -212,48 +266,3 @@ class Strategy(BaseStrategy):
                 f"指数收跌；振幅比{rmax:.2%}（非5%限制股）"
             ),
         }
-
-    # ------------------------------------------------------------------ #
-    def prefilter_mask_df(self, df: pd.DataFrame) -> np.ndarray | None:
-        """向量化预筛：只用 CORE1 的三个必要条件（均为 signal 的必要条件）。
-
-        RSI6 < rsi_max、当日振幅 > amp_min、收盘价 > price_min，
-        外加板块与 ST 这两个逐股常量条件。
-        """
-        p = self.params
-        rsi_period = int(p.get("rsi_period", 6))
-        rsi_max = float(p.get("rsi_max", 20.0))
-        amp_min = float(p.get("amp_min", 8.0))
-        price_min = float(p.get("price_min", 20.0))
-        boards = [b.strip() for b in str(p.get("boards", "60,00,30")).split(",") if b.strip()]
-        exclude_st = bool(p.get("exclude_st", True))
-        min_bars = int(p.get("min_bars", 65))
-
-        n = len(df)
-        mask = np.zeros(n, dtype=bool)
-        code = str(df["code"].iloc[-1]) if "code" in df.columns else ""
-        num = code.split(".")[-1]
-        if boards and not any(num.startswith(b) for b in boards):
-            return mask
-        # ST 是逐日标记：仅在非 ST 的日子保留候选（ST 日一定不出信号）
-        if exclude_st and "isST" in df.columns:
-            st_day = df["isST"].astype(str).str.strip().isin({"1", "1.0", "True"}).to_numpy()
-            base = ~st_day
-        else:
-            base = np.ones(n, dtype=bool)
-
-        close = df["close"].astype(float).reset_index(drop=True)
-        high = df["high"].astype(float).reset_index(drop=True)
-        low = df["low"].astype(float).reset_index(drop=True)
-        lc = close.shift(1)
-
-        rsi = _rsi(close, rsi_period)
-        amp = (high - low) / lc * 100.0
-
-        ok = (rsi < rsi_max) & (amp > amp_min) & base
-        if price_min > 0:
-            ok &= (close > price_min)
-        mask = ok.fillna(False).to_numpy()
-        if min_bars > 1:
-            mask[: min_bars - 1] = False
-        return mask

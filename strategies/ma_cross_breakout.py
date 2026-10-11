@@ -1,7 +1,15 @@
 """策略：均线单次金叉突破 + 低波动 + 动量爆发。
 
-条件按"廉价且筛选力强"的顺序执行（顺序不影响结果，只影响性能——
-一旦前面条件不满足即提前返回，后面的滚动均线/标准差就不必计算）：
+【条件顺序：按过滤代价由低到高手工排定，结果与顺序无关】
+（AND 关系，任一不满足即提前 return；顺序只影响性能。一旦前置条件不过，
+后面的滚动均线/标准差/循环计数就不必计算。）
+
+代价评估（2026-10-12 取消向量化预筛后，改为在策略内部靠顺序换性能）：
+    O(1) 末行取值        →  条件 1 动量爆发、条件 2 换手率
+    rolling(10) 均线     →  条件 2 内的换手率均线
+    rolling(60) 均线 + 循环计数 → 条件 3 金叉次数（lookback 次切片，最贵）
+    rolling(20) 均值/标准差 + 全窗口遍历 → 条件 4 低波动（最贵，放最后）
+即：越靠前越便宜、越早短路；昂贵的条件 3/4 只在少数候选日才被执行。
 
 1. 动量爆发：最近 surge_days（默认 2）个交易日累计涨幅 > surge_pct。
 2. 量能放大：最新换手率 > 换手率的 turn_ma 日（默认 10）均线 × turn_ratio。
@@ -187,37 +195,6 @@ class Strategy(BaseStrategy):
                 f"低波动({vol_note}{trim_note})"
             ),
         }
-
-    def prefilter_mask(self, close: np.ndarray) -> np.ndarray:
-        """向量化预筛（必要条件超集，不改变信号语义）。
-
-        候选日必须同时满足：
-        1. 数据量足够：i >= need - 1（与 signal 的 len(df) < need 早退一致）；
-        2. 动量必要条件：close[i] / close[i - surge_days] - 1 > surge_pct。
-
-        二者都是 signal() 通过时的必要条件，故掩码不会漏信号；
-        却能在回溯中跳过绝大多数交易日，避免逐日全量计算。
-        """
-        lookback = int(self.params.get("lookback", 60))
-        surge_days = int(self.params.get("surge_days", 2))
-        surge_pct = float(self.params.get("surge_pct", 0.15))
-        boll_ma = int(self.params.get("boll_ma", 20))
-        cross_ma_base = int(self.params.get("cross_ma_base", 60))
-
-        close = np.asarray(close, dtype=float)
-        n = close.shape[0]
-        mask = np.zeros(n, dtype=bool)
-        need = max(cross_ma_base, boll_ma) + lookback
-        if n <= max(surge_days, need - 1):
-            return mask
-
-        # 与 signal 中 `surge <= surge_pct 即拒绝` 严格对齐：这里用 > (阈值 - eps)
-        # 放宽下界，避免浮点边界把真正的信号日筛掉（漏筛不可容忍，多筛只是稍慢）。
-        with np.errstate(divide="ignore", invalid="ignore"):
-            surge = close[surge_days:] / close[:-surge_days] - 1.0
-        mask[surge_days:] = surge > (surge_pct - 1e-9)
-        mask[: need - 1] = False
-        return mask
 
     # ------------------------------------------------------------------ #
     # 阈值选取辅助：极差/最小值 横截面分布分析（用于给 vol_ratio_max 定值）
