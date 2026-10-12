@@ -227,3 +227,61 @@ strategies:
       min_listed_days: 180
       min_bars: 60
       holding: 5
+
+  # ---- b1_oversold 的升级版：并入归一化超跌门槛（不改动 b1_oversold 本身）----
+  # 归一化条件补的是 b1 缺失的"中期位置"维度；研究报告显示它不适合单独成策略
+  # （组合口径为负），更适合做正交过滤器。阈值务必用 Q1 档（Q2 已实测失效）。
+  - name: b1_oversold_norm
+    enabled: true
+    script: strategies/b1_oversold_norm.py
+    params:
+      # ---- 归一化超跌门槛（Q1 档）----
+      r_ma5_ma60_max: 0.9058
+      r_ma60_max: 0.8995
+      use_ma5_ma60: true
+      use_ma60: true
+      # ---- 以下为 b1_oversold 原有参数 ----
+      rsi_period: 6
+      rsi_max: 20.0
+      amp_min: 8.0
+      amp_canbuy: 1.0
+      price_min: 20.0
+      lu_window: 20
+      rmax_window: 60
+      zt_main: 1.095
+      zt_gem: 1.195
+      boards: "60,00,30"      # 白名单：已天然排除科创板（含 689 CDR）
+      exclude_st: true
+      min_listed_bars: 250
+      require_market_down: true
+      market_index: "399317"
+      min_bars: 65
+      holding: 5
+
+  - name: b1_oversold_norm_slope
+    enabled: true
+    script: strategies/b1_oversold_norm.py
+    params:
+      # ---- 归一化超跌门槛（Q1 档 + MA20 快速下滑）----
+      r_ma5_ma60_max: 0.9058
+      r_ma60_max: 0.8995
+      slope_ma20_5_max: -2.1382
+      use_ma5_ma60: true
+      use_ma60: true
+      # ---- b1_oversold 原有参数 ----
+      rsi_period: 6
+      rsi_max: 20.0
+      amp_min: 8.0
+      amp_canbuy: 1.0
+      price_min: 20.0
+      lu_window: 20
+      rmax_window: 60
+      zt_main: 1.095
+      zt_gem: 1.195
+      boards: "60,00,30"
+      exclude_st: true
+      min_listed_bars: 250
+      require_market_down: true
+      market_index: "399317"
+      min_bars: 65
+      holding: 5
