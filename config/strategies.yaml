@@ -12,7 +12,9 @@ strategies:
       holding: 5
 
   - name: volume_breakout
-    enabled: true
+    enabled: false          # 关闭：回测累计收益为负（约 -26%）、近期胜率仅 31~33%，
+                            # 且占当日选股信号的 97% 拖累整体；另无独立 ML 模型
+                            # （--filter 会跳过它，二次过滤对它无效）
     script: strategies/volume_breakout.py
     params:
       n: 20
