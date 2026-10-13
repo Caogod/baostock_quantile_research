@@ -1,10 +1,15 @@
 """无依赖 SVG 绘图工具（折线 / 散点 / 参考线 + 图例），用于实验报告出图。
 
-为什么不用 matplotlib：本机 conda `stock` 环境里的 matplotlib 3.3.1 其二进制扩展是
-**cp38 构建**（`ft2font.cp38-win_amd64.pyd`），而该环境是 **Python 3.14**，
-`import matplotlib` 会在 `_check_versions()` 处直接 ImportError（无法加载 ft2font），
-且当前无网络不便重装。本模块用纯字符串拼 SVG，零依赖、离线可生成，
-浏览器 / 编辑器预览均可直接查看，也不改动用户环境。
+为什么保留这套自绘方案（而不是全用 matplotlib）：
+- **零依赖**：不需要 matplotlib/Pillow 等二进制包，任何 Python 环境都能跑出图；
+  SVG 是矢量、体积小、可直接嵌进 HTML（报告自包含，不依赖外部图片文件）；
+- 出图内容是**统计图表**（折线/散点/刻度/图例），这套 200 行的实现已够用。
+
+背景（2026-10-13 的历史原因，现已被修复，保留记录）：
+当时 conda `stock` 环境是 Python 3.14，而其中 matplotlib 3.3.1 的二进制扩展是 cp38 构建，
+`import matplotlib` 直接 ImportError（连带 Pillow 的 `_imaging`、kiwisolver 也不可用）。
+2026-10-14 已把该环境升级到 matplotlib 3.11.2 / Pillow 12.3.0 / kiwisolver 1.5.1，
+matplotlib 现在可正常使用；本模块仍作为"不依赖第三方绘图库"的备选方案保留。
 
 用法：
     c = Chart(title="测试样本误差曲线")

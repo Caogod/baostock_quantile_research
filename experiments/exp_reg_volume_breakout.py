@@ -17,8 +17,10 @@
     2. 最优模型 OOF 测试误差 随时间（按 entry_date）曲线 + 滚动均值 —— 看误差是否漂移
     3. 学习曲线（训练集规模 vs 训练/测试 MAE）—— 看是欠拟合还是数据量不足
     4. OOF 预测 vs 实际散点（含 y=x 参考线）
-    绘图用 `experiments/svg_chart.py`（无依赖 SVG）：本机 conda 环境的 matplotlib
-    是 cp38 构建、与 Python 3.14 不匹配，无法 import。
+    绘图用 `experiments/svg_chart.py`（无依赖 SVG），报告为自包含 HTML。
+    说明：此前是因为 conda `stock` 环境的 matplotlib 二进制与 Python 版本不匹配、
+    无法 import 才自绘 SVG（2026-10-14 已把该环境升级到 matplotlib 3.11.2，现在也能用
+    matplotlib 出 PNG）；保留 svg_chart 是取其"零依赖 + 矢量 + 可内嵌"的好处。
 
 用法：
     python experiments/exp_reg_volume_breakout.py

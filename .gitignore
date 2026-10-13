@@ -69,6 +69,7 @@ backtest_output/*.csv
 research_output/*.csv
 research_output/*.svg
 research_output/*.html
+research_output/*.png
 
 # --- 日志与临时文件 ---
 *.log
