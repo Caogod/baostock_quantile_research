@@ -4,6 +4,14 @@
 - 每策略独立模型（推荐）：`models/win_model_<strategy>.joblib`，按选股结果的
   strategy 列逐策略加载对应模型过滤（WinModelSet）。
 - 单一全局模型（兼容）：`models/win_model.joblib`，对所有策略共用（WinModel）。
+
+sidecar JSON（`win_model_<strategy>.json`）两种格式都支持：
+- 旧格式：仅特征名列表 `["mom_5", ...]`；
+- 新格式：元数据字典 `{"features": [...], "holding_days": 5, "n_samples": 71,
+  "cv_accuracy": 57.14, "cv_by_model": {...}, "trained_at": "..."}`。
+
+新格式让「线上正在用的模型到底多好」可审计（此前只有特征名，看不出样本量、
+持仓周期与 CV 准确率）；`WinModel.meta` 暴露该字典，`describe()` 给出单行摘要。
 """
 from __future__ import annotations
 
@@ -26,14 +34,47 @@ class WinModel:
         if not self.model_path.exists():
             raise FileNotFoundError(f"模型不存在: {self.model_path}（请先运行 train_model.py）")
         self.model = joblib.load(self.model_path)
-        # 可选：特征列表（校验口径）
-        meta = self.model_path.with_suffix(".json")
+        # 可选 sidecar：特征列表（校验口径）+ 训练元数据（审计）
         self.features = FEATURES
-        if meta.exists():
+        self.meta: dict = {}
+        meta_path = self.model_path.with_suffix(".json")
+        if meta_path.exists():
             try:
-                self.features = json.loads(meta.read_text(encoding="utf-8"))
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                data = None
+            if isinstance(data, list):  # 旧格式：仅特征名列表
+                if data:
+                    self.features = data
+            elif isinstance(data, dict):
+                feats = data.get("features")
+                if isinstance(feats, list) and feats:
+                    self.features = feats
+                self.meta = {k: v for k, v in data.items() if k != "features"}
+
+    def describe(self) -> str:
+        """单行摘要：持仓周期 / 样本量 / CV 准确率 / 训练时间。
+
+        旧格式 sidecar（或无 sidecar）没有元数据，此时明确标注「未落盘指标」，
+        以便一眼看出该模型不可审计。
+        """
+        m = self.meta
+        if not m:
+            return f"{self.model_path.stem}: (sidecar 无训练元数据，指标未落盘)"
+        parts = [self.model_path.stem]
+        if m.get("holding_days") is not None:
+            parts.append(f"持仓{m['holding_days']}日")
+        if m.get("n_samples") is not None:
+            parts.append(f"样本{m['n_samples']}")
+        if m.get("cv_accuracy") is not None:
+            parts.append(f"CV {m['cv_accuracy']}%")
+        if m.get("baseline") is not None:
+            parts.append(f"基线{m['baseline']}%")
+        if m.get("chosen_model"):
+            parts.append(str(m["chosen_model"]))
+        if m.get("trained_at"):
+            parts.append(f"训练于{m['trained_at'][:10]}")
+        return " | ".join(parts)
 
     def predict_prob(self, feat_df: pd.DataFrame) -> pd.Series:
         """对特征 DataFrame 预测盈利概率（0~1）。"""
@@ -84,6 +125,7 @@ class WinModelSet:
         if not self.model_dir.is_dir():
             raise FileNotFoundError(f"模型目录不存在: {self.model_dir}")
         self.models: dict[str, WinModel] = {}
+        self._expected: set[str] = set(strategies or [])
         for strat in strategies or []:
             p = self.model_dir / f"win_model_{strat}.joblib"
             if p.exists():
@@ -97,6 +139,20 @@ class WinModelSet:
             self.models[strategy] = WinModel(p)
             return self.models[strategy]
         return None
+
+    def model_info(self) -> list[str]:
+        """列出已加载模型的训练元数据摘要（含缺失模型的提示）。
+
+        用于在过滤时把「用了哪个模型、它的持仓周期/样本量/CV 是多少」打进日志，
+        避免模型指标不可审计。
+        """
+        lines: list[str] = []
+        for strat, model in sorted(self.models.items()):
+            lines.append(f"{strat} -> {model.describe()}")
+        missing = [s for s in sorted(self._expected) if s not in self.models]
+        if missing:
+            lines.append(f"缺少独立模型（这些策略不会被过滤）: {missing}")
+        return lines
 
     def score_selection(
         self,
@@ -176,6 +232,9 @@ def apply_filter(
         # 每策略独立模型
         strategies = sorted(selection["strategy"].dropna().astype(str).unique()) if not selection.empty else []
         model_set = WinModelSet(mp, strategies=strategies)
+        # 打印所用模型的训练元数据（持仓周期/样本量/CV/训练日期），保证可审计
+        for line in model_set.model_info():
+            print(f"[filter] 模型 {line}")
         if selection.empty:
             scored = selection.assign(win_prob=pd.Series(dtype=float))
             missing = set()

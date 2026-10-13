@@ -10,8 +10,16 @@
   - 核心：最优轮次 CV 是否显著高于首轮（全特征）CV。
   - 参考：所有轮次模型等权集成的 OOF 准确率（通常混入早期弱模型反而有害）。
 
+数据与持仓周期口径（与主线 train_model.py 一致，见 experiments/exp_common.py）：
+  - 明细/样本库路径不再硬编码：--detail/--library > 环境变量
+    SQ_DETAIL_PATH/SQ_LIBRARY_PATH > 自动发现最完整的明细；
+  - --holding auto（默认）按各策略 config 中声明的 holding 拆分，避免 3/5/10
+    三种持有期的样本混在一起（混用会让 CV 与"该持有期的胜率"不对应）。
+
 用法：
     python experiments/exp_iterative_train.py [--model-type xgboost] [--bottom-n 3] [--patience 3]
+    python experiments/exp_iterative_train.py --holding 5
+    python experiments/exp_iterative_train.py --detail backtest_output/backtest_detail_xxx.csv
 """
 from __future__ import annotations
 
@@ -26,7 +34,12 @@ from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from experiments.exp_common import load_dataset  # noqa: E402
+from experiments.exp_common import (  # noqa: E402
+    describe_dataset,
+    enabled_strategies,
+    load_dataset,
+    resolve_holdings,
+)
 from core.features import FEATURES  # noqa: E402
 from train_model import build_models, MODEL_TYPE_KEYS  # noqa: E402
 
@@ -141,20 +154,45 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-type", default="xgboost", choices=list(MODEL_TYPE_KEYS))
     ap.add_argument("--strategies", default="", help="逗号分隔，空=全部")
+    ap.add_argument("--detail", default="", help="回溯明细 CSV（空=自动解析最完整的一份）")
+    ap.add_argument("--library", default="", help="本地样本库 Parquet（空=默认合并库）")
+    ap.add_argument("--holding", default="auto",
+                    help="持仓周期口径：auto=按各策略 config 声明的 holding（默认）；"
+                         "或整数（如 5）统一指定，避免 3/5/10 混在一起")
     ap.add_argument("--bottom-n", type=int, default=BOTTOM_N, help="每轮剔除的最不重要特征数")
     ap.add_argument("--patience", type=int, default=PATIENCE, help="CV 连续不提升多少轮后停止")
     args = ap.parse_args()
 
-    df = load_dataset(strategies=args.strategies or None)
+    df = load_dataset(detail_path=args.detail or None,
+                      library_path=args.library or None,
+                      strategies=args.strategies or None,
+                      required=sorted({s.strip() for s in args.strategies.split(",") if s.strip()})
+                      or enabled_strategies())
     tscv = TimeSeriesSplit(n_splits=5)
     model_factory = lambda: build_models()[MODEL_TYPE_KEYS[args.model_type]]  # noqa: E731
 
+    # 持仓周期拆分（避免同一策略的 3/5/10 日样本混在一起训练）
+    holdings = resolve_holdings(df, args.holding, verbose=True)
+
     print(f"实验B：递归特征消除（Bottom-{args.bottom_n} 剔除，模型={args.model_type}，"
           f"patience={args.patience}）")
-    print(f"样本总量: {len(df)}，策略: {sorted(df['strategy'].unique())}\n")
+    print(f"数据集: {describe_dataset(df)}")
+    if holdings:
+        print("持仓周期: " + ", ".join(f"{k}={v}" for k, v in sorted(holdings.items())))
+    print()
 
     summary_rows = []
     for strat, g in df.groupby("strategy"):
+        want_h = holdings.get(str(strat))
+        if holdings and want_h is None:
+            print(f"[skip] {strat}: 无法确定持仓周期（holding_days 全缺失），跳过")
+            continue
+        if want_h is not None:
+            g_h = g[g["holding_days"] == want_h]
+            if g_h.empty:
+                print(f"[skip] {strat}: 无 holding_days={want_h} 的样本")
+                continue
+            g = g_h
         n = len(g)
         if n < MIN_SAMPLES:
             print(f"[skip] {strat}: 样本 {n} < {MIN_SAMPLES}")
@@ -163,8 +201,11 @@ def main():
         X_all = g[FEATURES].values
         y = g["win"].values
         baseline = max(float(y.mean()), 1 - float(y.mean()))
+        h_used = int(g["holding_days"].iloc[0]) if "holding_days" in g.columns and pd.notna(
+            g["holding_days"].iloc[0]) else None
 
-        print(f"\n=== {strat}（样本 {len(g)}，baseline {baseline*100:.2f}%）===")
+        h_desc = f"持仓 {h_used} 日，" if h_used is not None else ""
+        print(f"\n=== {strat}（{h_desc}样本 {len(g)}，baseline {baseline*100:.2f}%）===")
         rounds, models, feat_lists = run_iterative(
             X_all, y, FEATURES, model_factory, tscv, bottom_n=args.bottom_n, patience=args.patience
         )
@@ -181,7 +222,8 @@ def main():
 
         summary_rows.append({
             "strategy": strat,
-            "samples": n,
+            "holding_days": h_used,
+            "samples": len(g),
             "baseline": round(baseline * 100, 2),
             "first_round_acc": round(first_acc * 100, 2),
             "best_round_acc": round(best_acc * 100, 2),
