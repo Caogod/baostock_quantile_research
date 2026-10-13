@@ -67,6 +67,8 @@ backtest_output/*.csv
 
 # --- 研究数据集产物（可由 experiments/ 脚本重建，体积大，不入库） ---
 research_output/*.csv
+research_output/*.svg
+research_output/*.html
 
 # --- 日志与临时文件 ---
 *.log
