@@ -157,13 +157,14 @@ strategies:
 
   # ---- 连续5日收阳 + 5日累计涨幅>20%（动量加速）----
   - name: consecutive_up5
-    enabled: true
+    enabled: false          # 关闭：回测累计收益为负（-34% ~ -41%）、近期衰减明显
+                            # （最近 30/90 日弱于 180 日）；追高动量型，样本期不适用
     script: strategies/consecutive_up5.py
     params:
       window: 5             # 连续上涨天数与累计涨幅窗口
       min_gain_pct: 20.0    # 窗口内累计涨幅下限(%)
       exclude_st: true      # 剔除 ST / 退市
       min_listed_days: 180  # 上市天数下限（自然日，0 不校验）
-      exclude_boards: "688" # 剔除板块前缀（科创板）
+      exclude_boards: "68"  # 剔除板块前缀（科创板整体，含 689 CDR）
       min_bars: 65
       holding: 5
