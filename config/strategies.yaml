@@ -12,9 +12,8 @@ strategies:
       holding: 5
 
   - name: volume_breakout
-    enabled: false          # 关闭：回测累计收益为负（约 -26%）、近期胜率仅 31~33%，
-                            # 且占当日选股信号的 97% 拖累整体；另无独立 ML 模型
-                            # （--filter 会跳过它，二次过滤对它无效）
+    enabled: false          # 关闭：回测累计收益为负（约 -26%）、近期胜率仅 31~33%
+                            # （全策略最低），曾占当日选股信号 97%；另无独立 ML 模型
     script: strategies/volume_breakout.py
     params:
       n: 20
@@ -166,5 +165,134 @@ strategies:
       exclude_st: true      # 剔除 ST / 退市
       min_listed_days: 180  # 上市天数下限（自然日，0 不校验）
       exclude_boards: "68"  # 剔除板块前缀（科创板整体，含 689 CDR）
+      min_bars: 65
+      holding: 5
+
+  # ---- 上升趋势中的缩量阴线回调（起涨前夜型，来源：docs/起涨点前兆分析报告.md 的候选信号检验）----
+  # 注意：检验时的条件是在「站上 MA20 且 MA20 向上」之内成立的，故策略必须带上该位置约束
+  # 状态：默认关闭。回测持仓 5 日 +13.99%、Sharpe 1.94 为本项目首个双正策略，但阈值是在
+  # **同一段样本**上筛出来的（数据窥探），且近期衰减明显（近 30 日胜率 30.9%），
+  # 待更长历史做样本外验证后再决定是否启用。要启用把 enabled 改为 true 即可。
+  - name: ma20_pullback_shrink
+    enabled: false
+    script: strategies/ma20_pullback_shrink.py
+    params:
+      ma_long: 20           # 趋势基准均线
+      pct_max: -2.61        # 当日涨跌幅上限(%)，≤该值才入选
+      vol_ratio_max: 0.90   # 量比上限（量 / 前 N 日均量）
+      vol_ma_window: 5      # 量比所用均量窗口
+      vol_include_today: true  # 均量含当日（与分析脚本口径一致；false 为A股常规量比）
+      exclude_st: true
+      exclude_boards: "688"
+      min_listed_days: 180
+      min_bars: 20          # 只需 MA20+5 根；刻意不取 65，以便回测样本贴合分析口径
+      holding: 5
+
+  # ---- 归一化超跌（尺度无关的 MA60 族条件，来源：docs/归一化特征信号研究.md）----
+  # 同一脚本登记 3 个阈值档，便于一次回测横向对比"严格 vs 放宽"的差异
+  # 状态：默认全部关闭。该维度单独用时**单笔均值为正但组合口径为负**
+  # （q1 累计 -6.87%、q1+斜率 -3.78%，信号高度同时聚集），更适合做正交过滤器
+  # （见 b1_oversold_norm）而非独立策略；q2 放宽档已实测失效（均收益约等于全库基准）。
+  - name: norm_oversold_q1
+    enabled: false
+    script: strategies/norm_oversold.py
+    params:
+      r_ma5_ma60_max: 0.9058  # MA5/MA60 的 Q1 上界（严）
+      r_ma60_max: 0.8995      # close/MA60 的 Q1 上界（严）
+      use_ma5_ma60: true
+      use_ma60: true
+      exclude_st: true
+      exclude_boards: "68"    # 科创板整体：sh.688* 之外还有 689*（CDR，如 sh.689009）
+      min_listed_days: 180
+      min_bars: 60
+      holding: 5
+
+  - name: norm_oversold_q2
+    enabled: false
+    script: strategies/norm_oversold.py
+    params:
+      r_ma5_ma60_max: 0.9575  # 放宽到 Q2 上界
+      r_ma60_max: 0.9543
+      use_ma5_ma60: true
+      use_ma60: true
+      exclude_st: true
+      exclude_boards: "68"    # 科创板整体（含 689 CDR）
+      min_listed_days: 180
+      min_bars: 60
+      holding: 5
+
+  - name: norm_oversold_q1_slope
+    enabled: false
+    script: strategies/norm_oversold.py
+    params:
+      r_ma5_ma60_max: 0.9058  # Q1 严档 + 叠加 MA20 快速下滑
+      r_ma60_max: 0.8995
+      slope_ma20_5_max: -2.1382
+      use_ma5_ma60: true
+      use_ma60: true
+      exclude_st: true
+      exclude_boards: "68"    # 科创板整体（含 689 CDR）
+      min_listed_days: 180
+      min_bars: 60
+      holding: 5
+
+  # ---- b1_oversold 的升级版：并入归一化超跌门槛（不改动 b1_oversold 本身）----
+  # 归一化条件补的是 b1 缺失的"中期位置"维度；研究报告显示它不适合单独成策略
+  # （组合口径为负），更适合做正交过滤器。阈值务必用 Q1 档（Q2 已实测失效）。
+  # 状态：默认关闭。回测持仓 5 日 53.3%/57.1% 胜率、+2.99%/+3.94% 均收益，且收益分布
+  # 质量明显改善（去掉最好 5% 后仍为正），但**样本仅 42~45 笔**且阈值取自同一段样本
+  # （数据窥探），Sharpe 9.65 在 42 笔上没有统计意义，需样本外检验后再启用。
+  - name: b1_oversold_norm
+    enabled: false
+    script: strategies/b1_oversold_norm.py
+    params:
+      # ---- 归一化超跌门槛（Q1 档）----
+      r_ma5_ma60_max: 0.9058
+      r_ma60_max: 0.8995
+      use_ma5_ma60: true
+      use_ma60: true
+      # ---- 以下为 b1_oversold 原有参数 ----
+      rsi_period: 6
+      rsi_max: 20.0
+      amp_min: 8.0
+      amp_canbuy: 1.0
+      price_min: 20.0
+      lu_window: 20
+      rmax_window: 60
+      zt_main: 1.095
+      zt_gem: 1.195
+      boards: "60,00,30"      # 白名单：已天然排除科创板（含 689 CDR）
+      exclude_st: true
+      min_listed_bars: 250
+      require_market_down: true
+      market_index: "399317"
+      min_bars: 65
+      holding: 5
+
+  - name: b1_oversold_norm_slope
+    enabled: false
+    script: strategies/b1_oversold_norm.py
+    params:
+      # ---- 归一化超跌门槛（Q1 档 + MA20 快速下滑）----
+      r_ma5_ma60_max: 0.9058
+      r_ma60_max: 0.8995
+      slope_ma20_5_max: -2.1382
+      use_ma5_ma60: true
+      use_ma60: true
+      # ---- b1_oversold 原有参数 ----
+      rsi_period: 6
+      rsi_max: 20.0
+      amp_min: 8.0
+      amp_canbuy: 1.0
+      price_min: 20.0
+      lu_window: 20
+      rmax_window: 60
+      zt_main: 1.095
+      zt_gem: 1.195
+      boards: "60,00,30"
+      exclude_st: true
+      min_listed_bars: 250
+      require_market_down: true
+      market_index: "399317"
       min_bars: 65
       holding: 5
